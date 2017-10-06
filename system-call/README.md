@@ -1,26 +1,8 @@
-## Set up
-
-```
-sudo apt-get update
-sudo apt-get upgrade
-```
-Network configuration:
-```
-sudo nano /etc/wpa_supplicant/wpa_supplicant.conf
-```
-
-Go to the bottom of the file and add the following:
-```
-network={
-    ssid="testing"
-    psk="testingPassword"
-}
-```
-
-## Kernel Building
+## Kernel Building (First Time)
 First install Git and the build dependencies:
 ```
 sudo apt-get install git bc
+sudo apt-get install ncurses-dev
 ```
 Next get the sources, which will take some time:
 ```
@@ -38,41 +20,114 @@ RASPBERRY PI 2, PI 3, AND COMPUTE MODULE 3 DEFAULT BUILD CONFIGURATION
 cd linux
 KERNEL=kernel7
 make bcm2709_defconfig
+make menuconfig    
 ```
-Build and install kernel (take long time)
+Build and install kernel
 ```
-make -j4 zImage modules dtbs
+make zImage modules dtbs -j4 
 sudo make modules_install
 sudo cp arch/arm/boot/dts/*.dtb /boot/
 sudo cp arch/arm/boot/dts/overlays/*.dtb* /boot/overlays/
 sudo cp arch/arm/boot/dts/overlays/README /boot/overlays/
-sudo cp arch/arm/boot/zImage /boot/$KERNEL.im
 ```
-## Back up 
-Make a snapshot archive of the folder
+Copy the built zImage to boot directory and rename 
 ```
-cd /home/
-sudo tar czf pi_9_29_9AM.tar.gz pi
+sudo cp arch/arm/boot/zImage /boot/haole-kernel.img
 ```
-This creates a tar archive called pi_home.tar.gz in /home/. You should copy this file to a USB stick or transfer it to another machine on your network.
+Finally, we have to re-configure the boot configuration file to choose specific kernel to boot
+```
+sudo nano /boot/config.txt 
+```
+Add these 2 lines:
+```
+kernel=haole-kernel.img
+#kernel=kernel.img          Note: This will tell the system to not boot the default kernel 
+```
+Reboot and check the new kernel version
+```
+sudo reboot
+uname -r
+```
 
-### SD card image
+## To add a syscall 
+
+We need to edit 4 files inside the linux folder: 
 ```
-sudo dd bs=4M if=/dev/sdb of=raspbian.img
+linux/arch/arm/kernel/calls.S
+linux/arch/arm/include/uapi/asm/unistd.h
+linux/arch/arm/kernel/sys_arm.c
+linux/include/linux/syscalls.h
 ```
-This will create an image file on your computer which you can use to write to another SD card
+1. File 1: linux/arch/arm/kernel/calls.S
+    Go to index 59
+    Edit this line as follow:
+    ````
+    change 
+    CALL(sys_ni_syscall) 
+    to 
+    CALL(sys_hello)
+    ```
+2. File 2: linux/arch/arm/include/uapi/asm/unistd.h
+    Go to index 59, add:
+    ```
+    #define __NR_hello                      (__NR_SYSCALL_BASE+ 59)
+    ```
+3. File 3: linux/arch/arm/kernel/sys_arm.c
+    Add this function at the end of the file:
+    ```
+    asmlinkage long sys_haole()
+    {
+        printk("Hello World, Hao Le\n");
+        return 0;
+    }
+    ```
+4. File 4: linux/include/linux/syscalls.h
+    Add this line at the end of the file:
+    ```
+    asmlinkage long sys_hello(void);
+    ```
+    
+Now after you configure all these files, we can re-compile the kernel
 ```
-sudo dd bs=4M if=raspbian.img of=/dev/sdb
+sudo make zImage modules dtbs -j4
+sudo make modules_install
+sudo cp arch/arm/boot/dts/*.dtb /boot/
+sudo cp arch/arm/boot/dts/overlays/*.dtb* /boot/overlays/
+sudo cp arch/arm/boot/dts/overlays/README /boot/overlays/
+sudo cp arch/arm/boot/zImage /boot/haole-kernel.img
+sudo reboot
 ```
-To compress, you can pipe the output of dd to gzip to get a compressed file that is significantly smaller than the original size:
+
+Once your system is back on, we need to write a function to invoke the syscall 
 ```
-sudo dd bs=4M if=/dev/sdb | gzip > raspbian.img.gz
+$mkdir userspace
+cd userspace
+nano test.c
 ```
-To restore, pipe the output of gunzip to dd:
+In this test.c file we add:
 ```
-gunzip --stdout raspbian.img.gz | sudo dd bs=4M of=/dev/sdb
+#include <stdio.h>
+#include <linux/kernel.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+int main()
+{
+        long int s = syscall(59);
+        printf("System call returned %1d \n",s);
+        return 0;
+}
+
 ```
-If you are using a Mac, the commands used are almost exactly the same, but 4M in the above examples should be replaced with 4m, with a lower case letter.
+Exit and compile
+```
+$ gcc test.c
+$ ./a.out
+```
+Check your system log
+```
+$dmesg
+```
 
 
 
