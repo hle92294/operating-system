@@ -1,0 +1,10 @@
+[    9.326047] Bluetooth: HCI UART protocol Three-wire (H5) registered
+[    9.326143] Bluetooth: HCI UART protocol Broadcom registered
+[    9.452950] Bluetooth: BNEP (Ethernet Emulation) ver 1.3
+[    9.452960] Bluetooth: BNEP filters: protocol multicast
+[    9.452979] Bluetooth: BNEP socket layer initialized
+[    9.511493] Bluetooth: RFCOMM TTY layer initialized
+[    9.511521] Bluetooth: RFCOMM socket layer initialized
+[    9.511535] Bluetooth: RFCOMM ver 1.11
+[   11.849215] fuse init (API version 7.26)
+[  386.384458] Hello World, Hao Le

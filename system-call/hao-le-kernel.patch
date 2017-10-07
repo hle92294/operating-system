@@ -1,0 +1,5364 @@
+diff -urNp linux/arch/arm/boot/dts/bcm270x.dtsi linux-hao/arch/arm/boot/dts/bcm270x.dtsi
+--- linux/arch/arm/boot/dts/bcm270x.dtsi	2017-10-07 00:57:02.553507841 +0000
++++ linux-hao/arch/arm/boot/dts/bcm270x.dtsi	2017-10-05 04:06:44.657501225 +0000
+@@ -26,11 +26,6 @@
+ 			interrupts = <2 17>, <2 18>;
+ 		};
+ 
+-		serial@7e201000 { /* uart0 */
+-			/* Enable CTS bug workaround */
+-			cts-event-workaround;
+-		};
+-
+ 		sdhost: sdhost@7e202000 {
+ 			compatible = "brcm,bcm2835-sdhost";
+ 			reg = <0x7e202000 0x100>;
+diff -urNp linux/arch/arm/crypto/aesbs-core.S linux-hao/arch/arm/crypto/aesbs-core.S
+--- linux/arch/arm/crypto/aesbs-core.S	1970-01-01 00:00:00.000000000 +0000
++++ linux-hao/arch/arm/crypto/aesbs-core.S	2017-10-05 04:16:40.302147091 +0000
+@@ -0,0 +1,2548 @@
++
++@ ====================================================================
++@ Written by Andy Polyakov <appro@openssl.org> for the OpenSSL
++@ project. The module is, however, dual licensed under OpenSSL and
++@ CRYPTOGAMS licenses depending on where you obtain it. For further
++@ details see http://www.openssl.org/~appro/cryptogams/.
++@
++@ Specific modes and adaptation for Linux kernel by Ard Biesheuvel
++@ <ard.biesheuvel@linaro.org>. Permission to use under GPL terms is
++@ granted.
++@ ====================================================================
++
++@ Bit-sliced AES for ARM NEON
++@
++@ February 2012.
++@
++@ This implementation is direct adaptation of bsaes-x86_64 module for
++@ ARM NEON. Except that this module is endian-neutral [in sense that
++@ it can be compiled for either endianness] by courtesy of vld1.8's
++@ neutrality. Initial version doesn't implement interface to OpenSSL,
++@ only low-level primitives and unsupported entry points, just enough
++@ to collect performance results, which for Cortex-A8 core are:
++@
++@ encrypt	19.5 cycles per byte processed with 128-bit key
++@ decrypt	22.1 cycles per byte processed with 128-bit key
++@ key conv.	440  cycles per 128-bit key/0.18 of 8x block
++@
++@ Snapdragon S4 encrypts byte in 17.6 cycles and decrypts in 19.7,
++@ which is [much] worse than anticipated (for further details see
++@ http://www.openssl.org/~appro/Snapdragon-S4.html).
++@
++@ Cortex-A15 manages in 14.2/16.1 cycles [when integer-only code
++@ manages in 20.0 cycles].
++@
++@ When comparing to x86_64 results keep in mind that NEON unit is
++@ [mostly] single-issue and thus can't [fully] benefit from
++@ instruction-level parallelism. And when comparing to aes-armv4
++@ results keep in mind key schedule conversion overhead (see
++@ bsaes-x86_64.pl for further details)...
++@
++@						<appro@openssl.org>
++
++@ April-August 2013
++@
++@ Add CBC, CTR and XTS subroutines, adapt for kernel use.
++@
++@					<ard.biesheuvel@linaro.org>
++
++#ifndef __KERNEL__
++# include "arm_arch.h"
++
++# define VFP_ABI_PUSH	vstmdb	sp!,{d8-d15}
++# define VFP_ABI_POP	vldmia	sp!,{d8-d15}
++# define VFP_ABI_FRAME	0x40
++#else
++# define VFP_ABI_PUSH
++# define VFP_ABI_POP
++# define VFP_ABI_FRAME	0
++# define BSAES_ASM_EXTENDED_KEY
++# define XTS_CHAIN_TWEAK
++# define __ARM_ARCH__ __LINUX_ARM_ARCH__
++# define __ARM_MAX_ARCH__ 7
++#endif
++
++#ifdef __thumb__
++# define adrl adr
++#endif
++
++#if __ARM_MAX_ARCH__>=7
++.arch	armv7-a
++.fpu	neon
++
++.text
++.syntax	unified 	@ ARMv7-capable assembler is expected to handle this
++#ifdef __thumb2__
++.thumb
++#else
++.code   32
++#endif
++
++.type	_bsaes_decrypt8,%function
++.align	4
++_bsaes_decrypt8:
++	adr	r6,_bsaes_decrypt8
++	vldmia	r4!, {q9}		@ round 0 key
++	add	r6,r6,#.LM0ISR-_bsaes_decrypt8
++
++	vldmia	r6!, {q8}		@ .LM0ISR
++	veor	q10, q0, q9	@ xor with round0 key
++	veor	q11, q1, q9
++	 vtbl.8	d0, {q10}, d16
++	 vtbl.8	d1, {q10}, d17
++	veor	q12, q2, q9
++	 vtbl.8	d2, {q11}, d16
++	 vtbl.8	d3, {q11}, d17
++	veor	q13, q3, q9
++	 vtbl.8	d4, {q12}, d16
++	 vtbl.8	d5, {q12}, d17
++	veor	q14, q4, q9
++	 vtbl.8	d6, {q13}, d16
++	 vtbl.8	d7, {q13}, d17
++	veor	q15, q5, q9
++	 vtbl.8	d8, {q14}, d16
++	 vtbl.8	d9, {q14}, d17
++	veor	q10, q6, q9
++	 vtbl.8	d10, {q15}, d16
++	 vtbl.8	d11, {q15}, d17
++	veor	q11, q7, q9
++	 vtbl.8	d12, {q10}, d16
++	 vtbl.8	d13, {q10}, d17
++	 vtbl.8	d14, {q11}, d16
++	 vtbl.8	d15, {q11}, d17
++	vmov.i8	q8,#0x55			@ compose .LBS0
++	vmov.i8	q9,#0x33			@ compose .LBS1
++	vshr.u64	q10, q6, #1
++	 vshr.u64	q11, q4, #1
++	veor		q10, q10, q7
++	 veor		q11, q11, q5
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q7, q7, q10
++	vshl.u64	q10, q10, #1
++	 veor		q5, q5, q11
++	 vshl.u64	q11, q11, #1
++	veor		q6, q6, q10
++	 veor		q4, q4, q11
++	vshr.u64	q10, q2, #1
++	 vshr.u64	q11, q0, #1
++	veor		q10, q10, q3
++	 veor		q11, q11, q1
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q3, q3, q10
++	vshl.u64	q10, q10, #1
++	 veor		q1, q1, q11
++	 vshl.u64	q11, q11, #1
++	veor		q2, q2, q10
++	 veor		q0, q0, q11
++	vmov.i8	q8,#0x0f			@ compose .LBS2
++	vshr.u64	q10, q5, #2
++	 vshr.u64	q11, q4, #2
++	veor		q10, q10, q7
++	 veor		q11, q11, q6
++	vand		q10, q10, q9
++	 vand		q11, q11, q9
++	veor		q7, q7, q10
++	vshl.u64	q10, q10, #2
++	 veor		q6, q6, q11
++	 vshl.u64	q11, q11, #2
++	veor		q5, q5, q10
++	 veor		q4, q4, q11
++	vshr.u64	q10, q1, #2
++	 vshr.u64	q11, q0, #2
++	veor		q10, q10, q3
++	 veor		q11, q11, q2
++	vand		q10, q10, q9
++	 vand		q11, q11, q9
++	veor		q3, q3, q10
++	vshl.u64	q10, q10, #2
++	 veor		q2, q2, q11
++	 vshl.u64	q11, q11, #2
++	veor		q1, q1, q10
++	 veor		q0, q0, q11
++	vshr.u64	q10, q3, #4
++	 vshr.u64	q11, q2, #4
++	veor		q10, q10, q7
++	 veor		q11, q11, q6
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q7, q7, q10
++	vshl.u64	q10, q10, #4
++	 veor		q6, q6, q11
++	 vshl.u64	q11, q11, #4
++	veor		q3, q3, q10
++	 veor		q2, q2, q11
++	vshr.u64	q10, q1, #4
++	 vshr.u64	q11, q0, #4
++	veor		q10, q10, q5
++	 veor		q11, q11, q4
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q5, q5, q10
++	vshl.u64	q10, q10, #4
++	 veor		q4, q4, q11
++	 vshl.u64	q11, q11, #4
++	veor		q1, q1, q10
++	 veor		q0, q0, q11
++	sub	r5,r5,#1
++	b	.Ldec_sbox
++.align	4
++.Ldec_loop:
++	vldmia	r4!, {q8-q11}
++	veor	q8, q8, q0
++	veor	q9, q9, q1
++	vtbl.8	d0, {q8}, d24
++	vtbl.8	d1, {q8}, d25
++	vldmia	r4!, {q8}
++	veor	q10, q10, q2
++	vtbl.8	d2, {q9}, d24
++	vtbl.8	d3, {q9}, d25
++	vldmia	r4!, {q9}
++	veor	q11, q11, q3
++	vtbl.8	d4, {q10}, d24
++	vtbl.8	d5, {q10}, d25
++	vldmia	r4!, {q10}
++	vtbl.8	d6, {q11}, d24
++	vtbl.8	d7, {q11}, d25
++	vldmia	r4!, {q11}
++	veor	q8, q8, q4
++	veor	q9, q9, q5
++	vtbl.8	d8, {q8}, d24
++	vtbl.8	d9, {q8}, d25
++	veor	q10, q10, q6
++	vtbl.8	d10, {q9}, d24
++	vtbl.8	d11, {q9}, d25
++	veor	q11, q11, q7
++	vtbl.8	d12, {q10}, d24
++	vtbl.8	d13, {q10}, d25
++	vtbl.8	d14, {q11}, d24
++	vtbl.8	d15, {q11}, d25
++.Ldec_sbox:
++	 veor	q1, q1, q4
++	veor	q3, q3, q4
++
++	veor	q4, q4, q7
++	 veor	q1, q1, q6
++	veor	q2, q2, q7
++	veor	q6, q6, q4
++
++	veor	q0, q0, q1
++	veor	q2, q2, q5
++	 veor	q7, q7, q6
++	veor	q3, q3, q0
++	veor	q5, q5, q0
++	veor	q1, q1, q3
++	veor	q11, q3, q0
++	veor	q10, q7, q4
++	veor	q9, q1, q6
++	veor	q13, q4, q0
++	 vmov	q8, q10
++	veor	q12, q5, q2
++
++	vorr	q10, q10, q9
++	veor	q15, q11, q8
++	vand	q14, q11, q12
++	vorr	q11, q11, q12
++	veor	q12, q12, q9
++	vand	q8, q8, q9
++	veor	q9, q6, q2
++	vand	q15, q15, q12
++	vand	q13, q13, q9
++	veor	q9, q3, q7
++	veor	q12, q1, q5
++	veor	q11, q11, q13
++	veor	q10, q10, q13
++	vand	q13, q9, q12
++	vorr	q9, q9, q12
++	veor	q11, q11, q15
++	veor	q8, q8, q13
++	veor	q10, q10, q14
++	veor	q9, q9, q15
++	veor	q8, q8, q14
++	vand	q12, q4, q6
++	veor	q9, q9, q14
++	vand	q13, q0, q2
++	vand	q14, q7, q1
++	vorr	q15, q3, q5
++	veor	q11, q11, q12
++	veor	q9, q9, q14
++	veor	q8, q8, q15
++	veor	q10, q10, q13
++
++	@ Inv_GF16 	0, 	1, 	2, 	3, s0, s1, s2, s3
++
++	@ new smaller inversion
++
++	vand	q14, q11, q9
++	vmov	q12, q8
++
++	veor	q13, q10, q14
++	veor	q15, q8, q14
++	veor	q14, q8, q14	@ q14=q15
++
++	vbsl	q13, q9, q8
++	vbsl	q15, q11, q10
++	veor	q11, q11, q10
++
++	vbsl	q12, q13, q14
++	vbsl	q8, q14, q13
++
++	vand	q14, q12, q15
++	veor	q9, q9, q8
++
++	veor	q14, q14, q11
++	veor	q12, q5, q2
++	veor	q8, q1, q6
++	veor 	q10, q15, q14
++	vand	q10, q10, q5
++	veor	q5, q5, q1
++	vand	q11, q1, q15
++	vand	q5, q5, q14
++	veor	q1, q11, q10
++	veor	q5, q5, q11
++	veor	q15, q15, q13
++	veor	q14, q14, q9
++	veor	q11, q15, q14
++	 veor 	q10, q13, q9
++	vand	q11, q11, q12
++	 vand	q10, q10, q2
++	veor	q12, q12, q8
++	 veor	q2, q2, q6
++	vand	q8, q8, q15
++	 vand	q6, q6, q13
++	vand	q12, q12, q14
++	 vand	q2, q2, q9
++	veor	q8, q8, q12
++	 veor	q2, q2, q6
++	veor	q12, q12, q11
++	 veor	q6, q6, q10
++	veor	q5, q5, q12
++	veor	q2, q2, q12
++	veor	q1, q1, q8
++	veor	q6, q6, q8
++
++	veor	q12, q3, q0
++	veor	q8, q7, q4
++	veor	q11, q15, q14
++	 veor 	q10, q13, q9
++	vand	q11, q11, q12
++	 vand	q10, q10, q0
++	veor	q12, q12, q8
++	 veor	q0, q0, q4
++	vand	q8, q8, q15
++	 vand	q4, q4, q13
++	vand	q12, q12, q14
++	 vand	q0, q0, q9
++	veor	q8, q8, q12
++	 veor	q0, q0, q4
++	veor	q12, q12, q11
++	 veor	q4, q4, q10
++	veor	q15, q15, q13
++	veor	q14, q14, q9
++	veor 	q10, q15, q14
++	vand	q10, q10, q3
++	veor	q3, q3, q7
++	vand	q11, q7, q15
++	vand	q3, q3, q14
++	veor	q7, q11, q10
++	veor	q3, q3, q11
++	veor	q3, q3, q12
++	veor	q0, q0, q12
++	veor	q7, q7, q8
++	veor	q4, q4, q8
++	veor	q1, q1, q7
++	veor	q6, q6, q5
++
++	veor	q4, q4, q1
++	veor	q2, q2, q7
++	veor	q5, q5, q7
++	veor	q4, q4, q2
++	 veor 	q7, q7, q0
++	veor	q4, q4, q5
++	 veor	q3, q3, q6
++	 veor	q6, q6, q1
++	veor	q3, q3, q4
++
++	veor	q4, q4, q0
++	veor	q7, q7, q3
++	subs	r5,r5,#1
++	bcc	.Ldec_done
++	@ multiplication by 0x05-0x00-0x04-0x00
++	vext.8	q8, q0, q0, #8
++	vext.8	q14, q3, q3, #8
++	vext.8	q15, q5, q5, #8
++	veor	q8, q8, q0
++	vext.8	q9, q1, q1, #8
++	veor	q14, q14, q3
++	vext.8	q10, q6, q6, #8
++	veor	q15, q15, q5
++	vext.8	q11, q4, q4, #8
++	veor	q9, q9, q1
++	vext.8	q12, q2, q2, #8
++	veor	q10, q10, q6
++	vext.8	q13, q7, q7, #8
++	veor	q11, q11, q4
++	veor	q12, q12, q2
++	veor	q13, q13, q7
++
++	 veor	q0, q0, q14
++	 veor	q1, q1, q14
++	 veor	q6, q6, q8
++	 veor	q2, q2, q10
++	 veor	q4, q4, q9
++	 veor	q1, q1, q15
++	 veor	q6, q6, q15
++	 veor	q2, q2, q14
++	 veor	q7, q7, q11
++	 veor	q4, q4, q14
++	 veor	q3, q3, q12
++	 veor	q2, q2, q15
++	 veor	q7, q7, q15
++	 veor	q5, q5, q13
++	vext.8	q8, q0, q0, #12	@ x0 <<< 32
++	vext.8	q9, q1, q1, #12
++	 veor	q0, q0, q8		@ x0 ^ (x0 <<< 32)
++	vext.8	q10, q6, q6, #12
++	 veor	q1, q1, q9
++	vext.8	q11, q4, q4, #12
++	 veor	q6, q6, q10
++	vext.8	q12, q2, q2, #12
++	 veor	q4, q4, q11
++	vext.8	q13, q7, q7, #12
++	 veor	q2, q2, q12
++	vext.8	q14, q3, q3, #12
++	 veor	q7, q7, q13
++	vext.8	q15, q5, q5, #12
++	 veor	q3, q3, q14
++
++	veor	q9, q9, q0
++	 veor	q5, q5, q15
++	 vext.8	q0, q0, q0, #8		@ (x0 ^ (x0 <<< 32)) <<< 64)
++	veor	q10, q10, q1
++	veor	q8, q8, q5
++	veor	q9, q9, q5
++	 vext.8	q1, q1, q1, #8
++	veor	q13, q13, q2
++	 veor	q0, q0, q8
++	veor	q14, q14, q7
++	 veor	q1, q1, q9
++	 vext.8	q8, q2, q2, #8
++	veor	q12, q12, q4
++	 vext.8	q9, q7, q7, #8
++	veor	q15, q15, q3
++	 vext.8	q2, q4, q4, #8
++	veor	q11, q11, q6
++	 vext.8	q7, q5, q5, #8
++	veor	q12, q12, q5
++	 vext.8	q4, q3, q3, #8
++	veor	q11, q11, q5
++	 vext.8	q3, q6, q6, #8
++	veor	q5, q9, q13
++	veor	q11, q11, q2
++	veor	q7, q7, q15
++	veor	q6, q4, q14
++	veor	q4, q8, q12
++	veor	q2, q3, q10
++	vmov	q3, q11
++	 @ vmov	q5, q9
++	vldmia	r6, {q12}		@ .LISR
++	ite	eq				@ Thumb2 thing, sanity check in ARM
++	addeq	r6,r6,#0x10
++	bne	.Ldec_loop
++	vldmia	r6, {q12}		@ .LISRM0
++	b	.Ldec_loop
++.align	4
++.Ldec_done:
++	vmov.i8	q8,#0x55			@ compose .LBS0
++	vmov.i8	q9,#0x33			@ compose .LBS1
++	vshr.u64	q10, q3, #1
++	 vshr.u64	q11, q2, #1
++	veor		q10, q10, q5
++	 veor		q11, q11, q7
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q5, q5, q10
++	vshl.u64	q10, q10, #1
++	 veor		q7, q7, q11
++	 vshl.u64	q11, q11, #1
++	veor		q3, q3, q10
++	 veor		q2, q2, q11
++	vshr.u64	q10, q6, #1
++	 vshr.u64	q11, q0, #1
++	veor		q10, q10, q4
++	 veor		q11, q11, q1
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q4, q4, q10
++	vshl.u64	q10, q10, #1
++	 veor		q1, q1, q11
++	 vshl.u64	q11, q11, #1
++	veor		q6, q6, q10
++	 veor		q0, q0, q11
++	vmov.i8	q8,#0x0f			@ compose .LBS2
++	vshr.u64	q10, q7, #2
++	 vshr.u64	q11, q2, #2
++	veor		q10, q10, q5
++	 veor		q11, q11, q3
++	vand		q10, q10, q9
++	 vand		q11, q11, q9
++	veor		q5, q5, q10
++	vshl.u64	q10, q10, #2
++	 veor		q3, q3, q11
++	 vshl.u64	q11, q11, #2
++	veor		q7, q7, q10
++	 veor		q2, q2, q11
++	vshr.u64	q10, q1, #2
++	 vshr.u64	q11, q0, #2
++	veor		q10, q10, q4
++	 veor		q11, q11, q6
++	vand		q10, q10, q9
++	 vand		q11, q11, q9
++	veor		q4, q4, q10
++	vshl.u64	q10, q10, #2
++	 veor		q6, q6, q11
++	 vshl.u64	q11, q11, #2
++	veor		q1, q1, q10
++	 veor		q0, q0, q11
++	vshr.u64	q10, q4, #4
++	 vshr.u64	q11, q6, #4
++	veor		q10, q10, q5
++	 veor		q11, q11, q3
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q5, q5, q10
++	vshl.u64	q10, q10, #4
++	 veor		q3, q3, q11
++	 vshl.u64	q11, q11, #4
++	veor		q4, q4, q10
++	 veor		q6, q6, q11
++	vshr.u64	q10, q1, #4
++	 vshr.u64	q11, q0, #4
++	veor		q10, q10, q7
++	 veor		q11, q11, q2
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q7, q7, q10
++	vshl.u64	q10, q10, #4
++	 veor		q2, q2, q11
++	 vshl.u64	q11, q11, #4
++	veor		q1, q1, q10
++	 veor		q0, q0, q11
++	vldmia	r4, {q8}			@ last round key
++	veor	q6, q6, q8
++	veor	q4, q4, q8
++	veor	q2, q2, q8
++	veor	q7, q7, q8
++	veor	q3, q3, q8
++	veor	q5, q5, q8
++	veor	q0, q0, q8
++	veor	q1, q1, q8
++	bx	lr
++.size	_bsaes_decrypt8,.-_bsaes_decrypt8
++
++.type	_bsaes_const,%object
++.align	6
++_bsaes_const:
++.LM0ISR:	@ InvShiftRows constants
++	.quad	0x0a0e0206070b0f03, 0x0004080c0d010509
++.LISR:
++	.quad	0x0504070602010003, 0x0f0e0d0c080b0a09
++.LISRM0:
++	.quad	0x01040b0e0205080f, 0x0306090c00070a0d
++.LM0SR:		@ ShiftRows constants
++	.quad	0x0a0e02060f03070b, 0x0004080c05090d01
++.LSR:
++	.quad	0x0504070600030201, 0x0f0e0d0c0a09080b
++.LSRM0:
++	.quad	0x0304090e00050a0f, 0x01060b0c0207080d
++.LM0:
++	.quad	0x02060a0e03070b0f, 0x0004080c0105090d
++.LREVM0SR:
++	.quad	0x090d01050c000408, 0x03070b0f060a0e02
++.asciz	"Bit-sliced AES for NEON, CRYPTOGAMS by <appro@openssl.org>"
++.align	6
++.size	_bsaes_const,.-_bsaes_const
++
++.type	_bsaes_encrypt8,%function
++.align	4
++_bsaes_encrypt8:
++	adr	r6,_bsaes_encrypt8
++	vldmia	r4!, {q9}		@ round 0 key
++	sub	r6,r6,#_bsaes_encrypt8-.LM0SR
++
++	vldmia	r6!, {q8}		@ .LM0SR
++_bsaes_encrypt8_alt:
++	veor	q10, q0, q9	@ xor with round0 key
++	veor	q11, q1, q9
++	 vtbl.8	d0, {q10}, d16
++	 vtbl.8	d1, {q10}, d17
++	veor	q12, q2, q9
++	 vtbl.8	d2, {q11}, d16
++	 vtbl.8	d3, {q11}, d17
++	veor	q13, q3, q9
++	 vtbl.8	d4, {q12}, d16
++	 vtbl.8	d5, {q12}, d17
++	veor	q14, q4, q9
++	 vtbl.8	d6, {q13}, d16
++	 vtbl.8	d7, {q13}, d17
++	veor	q15, q5, q9
++	 vtbl.8	d8, {q14}, d16
++	 vtbl.8	d9, {q14}, d17
++	veor	q10, q6, q9
++	 vtbl.8	d10, {q15}, d16
++	 vtbl.8	d11, {q15}, d17
++	veor	q11, q7, q9
++	 vtbl.8	d12, {q10}, d16
++	 vtbl.8	d13, {q10}, d17
++	 vtbl.8	d14, {q11}, d16
++	 vtbl.8	d15, {q11}, d17
++_bsaes_encrypt8_bitslice:
++	vmov.i8	q8,#0x55			@ compose .LBS0
++	vmov.i8	q9,#0x33			@ compose .LBS1
++	vshr.u64	q10, q6, #1
++	 vshr.u64	q11, q4, #1
++	veor		q10, q10, q7
++	 veor		q11, q11, q5
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q7, q7, q10
++	vshl.u64	q10, q10, #1
++	 veor		q5, q5, q11
++	 vshl.u64	q11, q11, #1
++	veor		q6, q6, q10
++	 veor		q4, q4, q11
++	vshr.u64	q10, q2, #1
++	 vshr.u64	q11, q0, #1
++	veor		q10, q10, q3
++	 veor		q11, q11, q1
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q3, q3, q10
++	vshl.u64	q10, q10, #1
++	 veor		q1, q1, q11
++	 vshl.u64	q11, q11, #1
++	veor		q2, q2, q10
++	 veor		q0, q0, q11
++	vmov.i8	q8,#0x0f			@ compose .LBS2
++	vshr.u64	q10, q5, #2
++	 vshr.u64	q11, q4, #2
++	veor		q10, q10, q7
++	 veor		q11, q11, q6
++	vand		q10, q10, q9
++	 vand		q11, q11, q9
++	veor		q7, q7, q10
++	vshl.u64	q10, q10, #2
++	 veor		q6, q6, q11
++	 vshl.u64	q11, q11, #2
++	veor		q5, q5, q10
++	 veor		q4, q4, q11
++	vshr.u64	q10, q1, #2
++	 vshr.u64	q11, q0, #2
++	veor		q10, q10, q3
++	 veor		q11, q11, q2
++	vand		q10, q10, q9
++	 vand		q11, q11, q9
++	veor		q3, q3, q10
++	vshl.u64	q10, q10, #2
++	 veor		q2, q2, q11
++	 vshl.u64	q11, q11, #2
++	veor		q1, q1, q10
++	 veor		q0, q0, q11
++	vshr.u64	q10, q3, #4
++	 vshr.u64	q11, q2, #4
++	veor		q10, q10, q7
++	 veor		q11, q11, q6
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q7, q7, q10
++	vshl.u64	q10, q10, #4
++	 veor		q6, q6, q11
++	 vshl.u64	q11, q11, #4
++	veor		q3, q3, q10
++	 veor		q2, q2, q11
++	vshr.u64	q10, q1, #4
++	 vshr.u64	q11, q0, #4
++	veor		q10, q10, q5
++	 veor		q11, q11, q4
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q5, q5, q10
++	vshl.u64	q10, q10, #4
++	 veor		q4, q4, q11
++	 vshl.u64	q11, q11, #4
++	veor		q1, q1, q10
++	 veor		q0, q0, q11
++	sub	r5,r5,#1
++	b	.Lenc_sbox
++.align	4
++.Lenc_loop:
++	vldmia	r4!, {q8-q11}
++	veor	q8, q8, q0
++	veor	q9, q9, q1
++	vtbl.8	d0, {q8}, d24
++	vtbl.8	d1, {q8}, d25
++	vldmia	r4!, {q8}
++	veor	q10, q10, q2
++	vtbl.8	d2, {q9}, d24
++	vtbl.8	d3, {q9}, d25
++	vldmia	r4!, {q9}
++	veor	q11, q11, q3
++	vtbl.8	d4, {q10}, d24
++	vtbl.8	d5, {q10}, d25
++	vldmia	r4!, {q10}
++	vtbl.8	d6, {q11}, d24
++	vtbl.8	d7, {q11}, d25
++	vldmia	r4!, {q11}
++	veor	q8, q8, q4
++	veor	q9, q9, q5
++	vtbl.8	d8, {q8}, d24
++	vtbl.8	d9, {q8}, d25
++	veor	q10, q10, q6
++	vtbl.8	d10, {q9}, d24
++	vtbl.8	d11, {q9}, d25
++	veor	q11, q11, q7
++	vtbl.8	d12, {q10}, d24
++	vtbl.8	d13, {q10}, d25
++	vtbl.8	d14, {q11}, d24
++	vtbl.8	d15, {q11}, d25
++.Lenc_sbox:
++	veor	q2, q2, q1
++	veor	q5, q5, q6
++	veor	q3, q3, q0
++	veor	q6, q6, q2
++	veor	q5, q5, q0
++
++	veor	q6, q6, q3
++	veor	q3, q3, q7
++	veor	q7, q7, q5
++	veor	q3, q3, q4
++	veor	q4, q4, q5
++
++	veor	q2, q2, q7
++	veor	q3, q3, q1
++	veor	q1, q1, q5
++	veor	q11, q7, q4
++	veor	q10, q1, q2
++	veor	q9, q5, q3
++	veor	q13, q2, q4
++	 vmov	q8, q10
++	veor	q12, q6, q0
++
++	vorr	q10, q10, q9
++	veor	q15, q11, q8
++	vand	q14, q11, q12
++	vorr	q11, q11, q12
++	veor	q12, q12, q9
++	vand	q8, q8, q9
++	veor	q9, q3, q0
++	vand	q15, q15, q12
++	vand	q13, q13, q9
++	veor	q9, q7, q1
++	veor	q12, q5, q6
++	veor	q11, q11, q13
++	veor	q10, q10, q13
++	vand	q13, q9, q12
++	vorr	q9, q9, q12
++	veor	q11, q11, q15
++	veor	q8, q8, q13
++	veor	q10, q10, q14
++	veor	q9, q9, q15
++	veor	q8, q8, q14
++	vand	q12, q2, q3
++	veor	q9, q9, q14
++	vand	q13, q4, q0
++	vand	q14, q1, q5
++	vorr	q15, q7, q6
++	veor	q11, q11, q12
++	veor	q9, q9, q14
++	veor	q8, q8, q15
++	veor	q10, q10, q13
++
++	@ Inv_GF16 	0, 	1, 	2, 	3, s0, s1, s2, s3
++
++	@ new smaller inversion
++
++	vand	q14, q11, q9
++	vmov	q12, q8
++
++	veor	q13, q10, q14
++	veor	q15, q8, q14
++	veor	q14, q8, q14	@ q14=q15
++
++	vbsl	q13, q9, q8
++	vbsl	q15, q11, q10
++	veor	q11, q11, q10
++
++	vbsl	q12, q13, q14
++	vbsl	q8, q14, q13
++
++	vand	q14, q12, q15
++	veor	q9, q9, q8
++
++	veor	q14, q14, q11
++	veor	q12, q6, q0
++	veor	q8, q5, q3
++	veor 	q10, q15, q14
++	vand	q10, q10, q6
++	veor	q6, q6, q5
++	vand	q11, q5, q15
++	vand	q6, q6, q14
++	veor	q5, q11, q10
++	veor	q6, q6, q11
++	veor	q15, q15, q13
++	veor	q14, q14, q9
++	veor	q11, q15, q14
++	 veor 	q10, q13, q9
++	vand	q11, q11, q12
++	 vand	q10, q10, q0
++	veor	q12, q12, q8
++	 veor	q0, q0, q3
++	vand	q8, q8, q15
++	 vand	q3, q3, q13
++	vand	q12, q12, q14
++	 vand	q0, q0, q9
++	veor	q8, q8, q12
++	 veor	q0, q0, q3
++	veor	q12, q12, q11
++	 veor	q3, q3, q10
++	veor	q6, q6, q12
++	veor	q0, q0, q12
++	veor	q5, q5, q8
++	veor	q3, q3, q8
++
++	veor	q12, q7, q4
++	veor	q8, q1, q2
++	veor	q11, q15, q14
++	 veor 	q10, q13, q9
++	vand	q11, q11, q12
++	 vand	q10, q10, q4
++	veor	q12, q12, q8
++	 veor	q4, q4, q2
++	vand	q8, q8, q15
++	 vand	q2, q2, q13
++	vand	q12, q12, q14
++	 vand	q4, q4, q9
++	veor	q8, q8, q12
++	 veor	q4, q4, q2
++	veor	q12, q12, q11
++	 veor	q2, q2, q10
++	veor	q15, q15, q13
++	veor	q14, q14, q9
++	veor 	q10, q15, q14
++	vand	q10, q10, q7
++	veor	q7, q7, q1
++	vand	q11, q1, q15
++	vand	q7, q7, q14
++	veor	q1, q11, q10
++	veor	q7, q7, q11
++	veor	q7, q7, q12
++	veor	q4, q4, q12
++	veor	q1, q1, q8
++	veor	q2, q2, q8
++	veor	q7, q7, q0
++	veor	q1, q1, q6
++	veor	q6, q6, q0
++	veor	q4, q4, q7
++	veor	q0, q0, q1
++
++	veor	q1, q1, q5
++	veor	q5, q5, q2
++	veor	q2, q2, q3
++	veor	q3, q3, q5
++	veor	q4, q4, q5
++
++	veor	q6, q6, q3
++	subs	r5,r5,#1
++	bcc	.Lenc_done
++	vext.8	q8, q0, q0, #12	@ x0 <<< 32
++	vext.8	q9, q1, q1, #12
++	 veor	q0, q0, q8		@ x0 ^ (x0 <<< 32)
++	vext.8	q10, q4, q4, #12
++	 veor	q1, q1, q9
++	vext.8	q11, q6, q6, #12
++	 veor	q4, q4, q10
++	vext.8	q12, q3, q3, #12
++	 veor	q6, q6, q11
++	vext.8	q13, q7, q7, #12
++	 veor	q3, q3, q12
++	vext.8	q14, q2, q2, #12
++	 veor	q7, q7, q13
++	vext.8	q15, q5, q5, #12
++	 veor	q2, q2, q14
++
++	veor	q9, q9, q0
++	 veor	q5, q5, q15
++	 vext.8	q0, q0, q0, #8		@ (x0 ^ (x0 <<< 32)) <<< 64)
++	veor	q10, q10, q1
++	veor	q8, q8, q5
++	veor	q9, q9, q5
++	 vext.8	q1, q1, q1, #8
++	veor	q13, q13, q3
++	 veor	q0, q0, q8
++	veor	q14, q14, q7
++	 veor	q1, q1, q9
++	 vext.8	q8, q3, q3, #8
++	veor	q12, q12, q6
++	 vext.8	q9, q7, q7, #8
++	veor	q15, q15, q2
++	 vext.8	q3, q6, q6, #8
++	veor	q11, q11, q4
++	 vext.8	q7, q5, q5, #8
++	veor	q12, q12, q5
++	 vext.8	q6, q2, q2, #8
++	veor	q11, q11, q5
++	 vext.8	q2, q4, q4, #8
++	veor	q5, q9, q13
++	veor	q4, q8, q12
++	veor	q3, q3, q11
++	veor	q7, q7, q15
++	veor	q6, q6, q14
++	 @ vmov	q4, q8
++	veor	q2, q2, q10
++	 @ vmov	q5, q9
++	vldmia	r6, {q12}		@ .LSR
++	ite	eq				@ Thumb2 thing, samity check in ARM
++	addeq	r6,r6,#0x10
++	bne	.Lenc_loop
++	vldmia	r6, {q12}		@ .LSRM0
++	b	.Lenc_loop
++.align	4
++.Lenc_done:
++	vmov.i8	q8,#0x55			@ compose .LBS0
++	vmov.i8	q9,#0x33			@ compose .LBS1
++	vshr.u64	q10, q2, #1
++	 vshr.u64	q11, q3, #1
++	veor		q10, q10, q5
++	 veor		q11, q11, q7
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q5, q5, q10
++	vshl.u64	q10, q10, #1
++	 veor		q7, q7, q11
++	 vshl.u64	q11, q11, #1
++	veor		q2, q2, q10
++	 veor		q3, q3, q11
++	vshr.u64	q10, q4, #1
++	 vshr.u64	q11, q0, #1
++	veor		q10, q10, q6
++	 veor		q11, q11, q1
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q6, q6, q10
++	vshl.u64	q10, q10, #1
++	 veor		q1, q1, q11
++	 vshl.u64	q11, q11, #1
++	veor		q4, q4, q10
++	 veor		q0, q0, q11
++	vmov.i8	q8,#0x0f			@ compose .LBS2
++	vshr.u64	q10, q7, #2
++	 vshr.u64	q11, q3, #2
++	veor		q10, q10, q5
++	 veor		q11, q11, q2
++	vand		q10, q10, q9
++	 vand		q11, q11, q9
++	veor		q5, q5, q10
++	vshl.u64	q10, q10, #2
++	 veor		q2, q2, q11
++	 vshl.u64	q11, q11, #2
++	veor		q7, q7, q10
++	 veor		q3, q3, q11
++	vshr.u64	q10, q1, #2
++	 vshr.u64	q11, q0, #2
++	veor		q10, q10, q6
++	 veor		q11, q11, q4
++	vand		q10, q10, q9
++	 vand		q11, q11, q9
++	veor		q6, q6, q10
++	vshl.u64	q10, q10, #2
++	 veor		q4, q4, q11
++	 vshl.u64	q11, q11, #2
++	veor		q1, q1, q10
++	 veor		q0, q0, q11
++	vshr.u64	q10, q6, #4
++	 vshr.u64	q11, q4, #4
++	veor		q10, q10, q5
++	 veor		q11, q11, q2
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q5, q5, q10
++	vshl.u64	q10, q10, #4
++	 veor		q2, q2, q11
++	 vshl.u64	q11, q11, #4
++	veor		q6, q6, q10
++	 veor		q4, q4, q11
++	vshr.u64	q10, q1, #4
++	 vshr.u64	q11, q0, #4
++	veor		q10, q10, q7
++	 veor		q11, q11, q3
++	vand		q10, q10, q8
++	 vand		q11, q11, q8
++	veor		q7, q7, q10
++	vshl.u64	q10, q10, #4
++	 veor		q3, q3, q11
++	 vshl.u64	q11, q11, #4
++	veor		q1, q1, q10
++	 veor		q0, q0, q11
++	vldmia	r4, {q8}			@ last round key
++	veor	q4, q4, q8
++	veor	q6, q6, q8
++	veor	q3, q3, q8
++	veor	q7, q7, q8
++	veor	q2, q2, q8
++	veor	q5, q5, q8
++	veor	q0, q0, q8
++	veor	q1, q1, q8
++	bx	lr
++.size	_bsaes_encrypt8,.-_bsaes_encrypt8
++.type	_bsaes_key_convert,%function
++.align	4
++_bsaes_key_convert:
++	adr	r6,_bsaes_key_convert
++	vld1.8	{q7},  [r4]!		@ load round 0 key
++	sub	r6,r6,#_bsaes_key_convert-.LM0
++	vld1.8	{q15}, [r4]!		@ load round 1 key
++
++	vmov.i8	q8,  #0x01			@ bit masks
++	vmov.i8	q9,  #0x02
++	vmov.i8	q10, #0x04
++	vmov.i8	q11, #0x08
++	vmov.i8	q12, #0x10
++	vmov.i8	q13, #0x20
++	vldmia	r6, {q14}		@ .LM0
++
++#ifdef __ARMEL__
++	vrev32.8	q7,  q7
++	vrev32.8	q15, q15
++#endif
++	sub	r5,r5,#1
++	vstmia	r12!, {q7}		@ save round 0 key
++	b	.Lkey_loop
++
++.align	4
++.Lkey_loop:
++	vtbl.8	d14,{q15},d28
++	vtbl.8	d15,{q15},d29
++	vmov.i8	q6,  #0x40
++	vmov.i8	q15, #0x80
++
++	vtst.8	q0, q7, q8
++	vtst.8	q1, q7, q9
++	vtst.8	q2, q7, q10
++	vtst.8	q3, q7, q11
++	vtst.8	q4, q7, q12
++	vtst.8	q5, q7, q13
++	vtst.8	q6, q7, q6
++	vtst.8	q7, q7, q15
++	vld1.8	{q15}, [r4]!		@ load next round key
++	vmvn	q0, q0		@ "pnot"
++	vmvn	q1, q1
++	vmvn	q5, q5
++	vmvn	q6, q6
++#ifdef __ARMEL__
++	vrev32.8	q15, q15
++#endif
++	subs	r5,r5,#1
++	vstmia	r12!,{q0-q7}		@ write bit-sliced round key
++	bne	.Lkey_loop
++
++	vmov.i8	q7,#0x63			@ compose .L63
++	@ don't save last round key
++	bx	lr
++.size	_bsaes_key_convert,.-_bsaes_key_convert
++.extern AES_cbc_encrypt
++.extern AES_decrypt
++
++.global	bsaes_cbc_encrypt
++.type	bsaes_cbc_encrypt,%function
++.align	5
++bsaes_cbc_encrypt:
++#ifndef	__KERNEL__
++	cmp	r2, #128
++#ifndef	__thumb__
++	blo	AES_cbc_encrypt
++#else
++	bhs	1f
++	b	AES_cbc_encrypt
++1:
++#endif
++#endif
++
++	@ it is up to the caller to make sure we are called with enc == 0
++
++	mov	ip, sp
++	stmdb	sp!, {r4-r10, lr}
++	VFP_ABI_PUSH
++	ldr	r8, [ip]			@ IV is 1st arg on the stack
++	mov	r2, r2, lsr#4		@ len in 16 byte blocks
++	sub	sp, #0x10			@ scratch space to carry over the IV
++	mov	r9, sp				@ save sp
++
++	ldr	r10, [r3, #240]		@ get # of rounds
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	@ allocate the key schedule on the stack
++	sub	r12, sp, r10, lsl#7		@ 128 bytes per inner round key
++	add	r12, #96			@ sifze of bit-slices key schedule
++
++	@ populate the key schedule
++	mov	r4, r3			@ pass key
++	mov	r5, r10			@ pass # of rounds
++	mov	sp, r12				@ sp is sp
++	bl	_bsaes_key_convert
++	vldmia	sp, {q6}
++	vstmia	r12,  {q15}		@ save last round key
++	veor	q7, q7, q6	@ fix up round 0 key
++	vstmia	sp, {q7}
++#else
++	ldr	r12, [r3, #244]
++	eors	r12, #1
++	beq	0f
++
++	@ populate the key schedule
++	str	r12, [r3, #244]
++	mov	r4, r3			@ pass key
++	mov	r5, r10			@ pass # of rounds
++	add	r12, r3, #248			@ pass key schedule
++	bl	_bsaes_key_convert
++	add	r4, r3, #248
++	vldmia	r4, {q6}
++	vstmia	r12, {q15}			@ save last round key
++	veor	q7, q7, q6	@ fix up round 0 key
++	vstmia	r4, {q7}
++
++.align	2
++0:
++#endif
++
++	vld1.8	{q15}, [r8]		@ load IV
++	b	.Lcbc_dec_loop
++
++.align	4
++.Lcbc_dec_loop:
++	subs	r2, r2, #0x8
++	bmi	.Lcbc_dec_loop_finish
++
++	vld1.8	{q0-q1}, [r0]!	@ load input
++	vld1.8	{q2-q3}, [r0]!
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	mov	r4, sp			@ pass the key
++#else
++	add	r4, r3, #248
++#endif
++	vld1.8	{q4-q5}, [r0]!
++	mov	r5, r10
++	vld1.8	{q6-q7}, [r0]
++	sub	r0, r0, #0x60
++	vstmia	r9, {q15}			@ put aside IV
++
++	bl	_bsaes_decrypt8
++
++	vldmia	r9, {q14}			@ reload IV
++	vld1.8	{q8-q9}, [r0]!	@ reload input
++	veor	q0, q0, q14	@ ^= IV
++	vld1.8	{q10-q11}, [r0]!
++	veor	q1, q1, q8
++	veor	q6, q6, q9
++	vld1.8	{q12-q13}, [r0]!
++	veor	q4, q4, q10
++	veor	q2, q2, q11
++	vld1.8	{q14-q15}, [r0]!
++	veor	q7, q7, q12
++	vst1.8	{q0-q1}, [r1]!	@ write output
++	veor	q3, q3, q13
++	vst1.8	{q6}, [r1]!
++	veor	q5, q5, q14
++	vst1.8	{q4}, [r1]!
++	vst1.8	{q2}, [r1]!
++	vst1.8	{q7}, [r1]!
++	vst1.8	{q3}, [r1]!
++	vst1.8	{q5}, [r1]!
++
++	b	.Lcbc_dec_loop
++
++.Lcbc_dec_loop_finish:
++	adds	r2, r2, #8
++	beq	.Lcbc_dec_done
++
++	vld1.8	{q0}, [r0]!		@ load input
++	cmp	r2, #2
++	blo	.Lcbc_dec_one
++	vld1.8	{q1}, [r0]!
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	mov	r4, sp			@ pass the key
++#else
++	add	r4, r3, #248
++#endif
++	mov	r5, r10
++	vstmia	r9, {q15}			@ put aside IV
++	beq	.Lcbc_dec_two
++	vld1.8	{q2}, [r0]!
++	cmp	r2, #4
++	blo	.Lcbc_dec_three
++	vld1.8	{q3}, [r0]!
++	beq	.Lcbc_dec_four
++	vld1.8	{q4}, [r0]!
++	cmp	r2, #6
++	blo	.Lcbc_dec_five
++	vld1.8	{q5}, [r0]!
++	beq	.Lcbc_dec_six
++	vld1.8	{q6}, [r0]!
++	sub	r0, r0, #0x70
++
++	bl	_bsaes_decrypt8
++
++	vldmia	r9, {q14}			@ reload IV
++	vld1.8	{q8-q9}, [r0]!	@ reload input
++	veor	q0, q0, q14	@ ^= IV
++	vld1.8	{q10-q11}, [r0]!
++	veor	q1, q1, q8
++	veor	q6, q6, q9
++	vld1.8	{q12-q13}, [r0]!
++	veor	q4, q4, q10
++	veor	q2, q2, q11
++	vld1.8	{q15}, [r0]!
++	veor	q7, q7, q12
++	vst1.8	{q0-q1}, [r1]!	@ write output
++	veor	q3, q3, q13
++	vst1.8	{q6}, [r1]!
++	vst1.8	{q4}, [r1]!
++	vst1.8	{q2}, [r1]!
++	vst1.8	{q7}, [r1]!
++	vst1.8	{q3}, [r1]!
++	b	.Lcbc_dec_done
++.align	4
++.Lcbc_dec_six:
++	sub	r0, r0, #0x60
++	bl	_bsaes_decrypt8
++	vldmia	r9,{q14}			@ reload IV
++	vld1.8	{q8-q9}, [r0]!	@ reload input
++	veor	q0, q0, q14	@ ^= IV
++	vld1.8	{q10-q11}, [r0]!
++	veor	q1, q1, q8
++	veor	q6, q6, q9
++	vld1.8	{q12}, [r0]!
++	veor	q4, q4, q10
++	veor	q2, q2, q11
++	vld1.8	{q15}, [r0]!
++	veor	q7, q7, q12
++	vst1.8	{q0-q1}, [r1]!	@ write output
++	vst1.8	{q6}, [r1]!
++	vst1.8	{q4}, [r1]!
++	vst1.8	{q2}, [r1]!
++	vst1.8	{q7}, [r1]!
++	b	.Lcbc_dec_done
++.align	4
++.Lcbc_dec_five:
++	sub	r0, r0, #0x50
++	bl	_bsaes_decrypt8
++	vldmia	r9, {q14}			@ reload IV
++	vld1.8	{q8-q9}, [r0]!	@ reload input
++	veor	q0, q0, q14	@ ^= IV
++	vld1.8	{q10-q11}, [r0]!
++	veor	q1, q1, q8
++	veor	q6, q6, q9
++	vld1.8	{q15}, [r0]!
++	veor	q4, q4, q10
++	vst1.8	{q0-q1}, [r1]!	@ write output
++	veor	q2, q2, q11
++	vst1.8	{q6}, [r1]!
++	vst1.8	{q4}, [r1]!
++	vst1.8	{q2}, [r1]!
++	b	.Lcbc_dec_done
++.align	4
++.Lcbc_dec_four:
++	sub	r0, r0, #0x40
++	bl	_bsaes_decrypt8
++	vldmia	r9, {q14}			@ reload IV
++	vld1.8	{q8-q9}, [r0]!	@ reload input
++	veor	q0, q0, q14	@ ^= IV
++	vld1.8	{q10}, [r0]!
++	veor	q1, q1, q8
++	veor	q6, q6, q9
++	vld1.8	{q15}, [r0]!
++	veor	q4, q4, q10
++	vst1.8	{q0-q1}, [r1]!	@ write output
++	vst1.8	{q6}, [r1]!
++	vst1.8	{q4}, [r1]!
++	b	.Lcbc_dec_done
++.align	4
++.Lcbc_dec_three:
++	sub	r0, r0, #0x30
++	bl	_bsaes_decrypt8
++	vldmia	r9, {q14}			@ reload IV
++	vld1.8	{q8-q9}, [r0]!	@ reload input
++	veor	q0, q0, q14	@ ^= IV
++	vld1.8	{q15}, [r0]!
++	veor	q1, q1, q8
++	veor	q6, q6, q9
++	vst1.8	{q0-q1}, [r1]!	@ write output
++	vst1.8	{q6}, [r1]!
++	b	.Lcbc_dec_done
++.align	4
++.Lcbc_dec_two:
++	sub	r0, r0, #0x20
++	bl	_bsaes_decrypt8
++	vldmia	r9, {q14}			@ reload IV
++	vld1.8	{q8}, [r0]!		@ reload input
++	veor	q0, q0, q14	@ ^= IV
++	vld1.8	{q15}, [r0]!		@ reload input
++	veor	q1, q1, q8
++	vst1.8	{q0-q1}, [r1]!	@ write output
++	b	.Lcbc_dec_done
++.align	4
++.Lcbc_dec_one:
++	sub	r0, r0, #0x10
++	mov	r10, r1			@ save original out pointer
++	mov	r1, r9			@ use the iv scratch space as out buffer
++	mov	r2, r3
++	vmov	q4,q15		@ just in case ensure that IV
++	vmov	q5,q0			@ and input are preserved
++	bl	AES_decrypt
++	vld1.8	{q0}, [r9,:64]		@ load result
++	veor	q0, q0, q4	@ ^= IV
++	vmov	q15, q5		@ q5 holds input
++	vst1.8	{q0}, [r10]		@ write output
++
++.Lcbc_dec_done:
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	vmov.i32	q0, #0
++	vmov.i32	q1, #0
++.Lcbc_dec_bzero:				@ wipe key schedule [if any]
++	vstmia		sp!, {q0-q1}
++	cmp		sp, r9
++	bne		.Lcbc_dec_bzero
++#endif
++
++	mov	sp, r9
++	add	sp, #0x10			@ add sp,r9,#0x10 is no good for thumb
++	vst1.8	{q15}, [r8]		@ return IV
++	VFP_ABI_POP
++	ldmia	sp!, {r4-r10, pc}
++.size	bsaes_cbc_encrypt,.-bsaes_cbc_encrypt
++.extern	AES_encrypt
++.global	bsaes_ctr32_encrypt_blocks
++.type	bsaes_ctr32_encrypt_blocks,%function
++.align	5
++bsaes_ctr32_encrypt_blocks:
++	cmp	r2, #8			@ use plain AES for
++	blo	.Lctr_enc_short			@ small sizes
++
++	mov	ip, sp
++	stmdb	sp!, {r4-r10, lr}
++	VFP_ABI_PUSH
++	ldr	r8, [ip]			@ ctr is 1st arg on the stack
++	sub	sp, sp, #0x10			@ scratch space to carry over the ctr
++	mov	r9, sp				@ save sp
++
++	ldr	r10, [r3, #240]		@ get # of rounds
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	@ allocate the key schedule on the stack
++	sub	r12, sp, r10, lsl#7		@ 128 bytes per inner round key
++	add	r12, #96			@ size of bit-sliced key schedule
++
++	@ populate the key schedule
++	mov	r4, r3			@ pass key
++	mov	r5, r10			@ pass # of rounds
++	mov	sp, r12				@ sp is sp
++	bl	_bsaes_key_convert
++	veor	q7,q7,q15	@ fix up last round key
++	vstmia	r12, {q7}			@ save last round key
++
++	vld1.8	{q0}, [r8]		@ load counter
++	add	r8, r6, #.LREVM0SR-.LM0	@ borrow r8
++	vldmia	sp, {q4}		@ load round0 key
++#else
++	ldr	r12, [r3, #244]
++	eors	r12, #1
++	beq	0f
++
++	@ populate the key schedule
++	str	r12, [r3, #244]
++	mov	r4, r3			@ pass key
++	mov	r5, r10			@ pass # of rounds
++	add	r12, r3, #248			@ pass key schedule
++	bl	_bsaes_key_convert
++	veor	q7,q7,q15	@ fix up last round key
++	vstmia	r12, {q7}			@ save last round key
++
++.align	2
++0:	add	r12, r3, #248
++	vld1.8	{q0}, [r8]		@ load counter
++	adrl	r8, .LREVM0SR			@ borrow r8
++	vldmia	r12, {q4}			@ load round0 key
++	sub	sp, #0x10			@ place for adjusted round0 key
++#endif
++
++	vmov.i32	q8,#1		@ compose 1<<96
++	veor		q9,q9,q9
++	vrev32.8	q0,q0
++	vext.8		q8,q9,q8,#4
++	vrev32.8	q4,q4
++	vadd.u32	q9,q8,q8	@ compose 2<<96
++	vstmia	sp, {q4}		@ save adjusted round0 key
++	b	.Lctr_enc_loop
++
++.align	4
++.Lctr_enc_loop:
++	vadd.u32	q10, q8, q9	@ compose 3<<96
++	vadd.u32	q1, q0, q8	@ +1
++	vadd.u32	q2, q0, q9	@ +2
++	vadd.u32	q3, q0, q10	@ +3
++	vadd.u32	q4, q1, q10
++	vadd.u32	q5, q2, q10
++	vadd.u32	q6, q3, q10
++	vadd.u32	q7, q4, q10
++	vadd.u32	q10, q5, q10	@ next counter
++
++	@ Borrow prologue from _bsaes_encrypt8 to use the opportunity
++	@ to flip byte order in 32-bit counter
++
++	vldmia		sp, {q9}		@ load round0 key
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x10		@ pass next round key
++#else
++	add		r4, r3, #264
++#endif
++	vldmia		r8, {q8}			@ .LREVM0SR
++	mov		r5, r10			@ pass rounds
++	vstmia		r9, {q10}			@ save next counter
++	sub		r6, r8, #.LREVM0SR-.LSR	@ pass constants
++
++	bl		_bsaes_encrypt8_alt
++
++	subs		r2, r2, #8
++	blo		.Lctr_enc_loop_done
++
++	vld1.8		{q8-q9}, [r0]!	@ load input
++	vld1.8		{q10-q11}, [r0]!
++	veor		q0, q8
++	veor		q1, q9
++	vld1.8		{q12-q13}, [r0]!
++	veor		q4, q10
++	veor		q6, q11
++	vld1.8		{q14-q15}, [r0]!
++	veor		q3, q12
++	vst1.8		{q0-q1}, [r1]!	@ write output
++	veor		q7, q13
++	veor		q2, q14
++	vst1.8		{q4}, [r1]!
++	veor		q5, q15
++	vst1.8		{q6}, [r1]!
++	vmov.i32	q8, #1			@ compose 1<<96
++	vst1.8		{q3}, [r1]!
++	veor		q9, q9, q9
++	vst1.8		{q7}, [r1]!
++	vext.8		q8, q9, q8, #4
++	vst1.8		{q2}, [r1]!
++	vadd.u32	q9,q8,q8		@ compose 2<<96
++	vst1.8		{q5}, [r1]!
++	vldmia		r9, {q0}			@ load counter
++
++	bne		.Lctr_enc_loop
++	b		.Lctr_enc_done
++
++.align	4
++.Lctr_enc_loop_done:
++	add		r2, r2, #8
++	vld1.8		{q8}, [r0]!	@ load input
++	veor		q0, q8
++	vst1.8		{q0}, [r1]!	@ write output
++	cmp		r2, #2
++	blo		.Lctr_enc_done
++	vld1.8		{q9}, [r0]!
++	veor		q1, q9
++	vst1.8		{q1}, [r1]!
++	beq		.Lctr_enc_done
++	vld1.8		{q10}, [r0]!
++	veor		q4, q10
++	vst1.8		{q4}, [r1]!
++	cmp		r2, #4
++	blo		.Lctr_enc_done
++	vld1.8		{q11}, [r0]!
++	veor		q6, q11
++	vst1.8		{q6}, [r1]!
++	beq		.Lctr_enc_done
++	vld1.8		{q12}, [r0]!
++	veor		q3, q12
++	vst1.8		{q3}, [r1]!
++	cmp		r2, #6
++	blo		.Lctr_enc_done
++	vld1.8		{q13}, [r0]!
++	veor		q7, q13
++	vst1.8		{q7}, [r1]!
++	beq		.Lctr_enc_done
++	vld1.8		{q14}, [r0]
++	veor		q2, q14
++	vst1.8		{q2}, [r1]!
++
++.Lctr_enc_done:
++	vmov.i32	q0, #0
++	vmov.i32	q1, #0
++#ifndef	BSAES_ASM_EXTENDED_KEY
++.Lctr_enc_bzero:			@ wipe key schedule [if any]
++	vstmia		sp!, {q0-q1}
++	cmp		sp, r9
++	bne		.Lctr_enc_bzero
++#else
++	vstmia		sp, {q0-q1}
++#endif
++
++	mov	sp, r9
++	add	sp, #0x10		@ add sp,r9,#0x10 is no good for thumb
++	VFP_ABI_POP
++	ldmia	sp!, {r4-r10, pc}	@ return
++
++.align	4
++.Lctr_enc_short:
++	ldr	ip, [sp]		@ ctr pointer is passed on stack
++	stmdb	sp!, {r4-r8, lr}
++
++	mov	r4, r0		@ copy arguments
++	mov	r5, r1
++	mov	r6, r2
++	mov	r7, r3
++	ldr	r8, [ip, #12]		@ load counter LSW
++	vld1.8	{q1}, [ip]		@ load whole counter value
++#ifdef __ARMEL__
++	rev	r8, r8
++#endif
++	sub	sp, sp, #0x10
++	vst1.8	{q1}, [sp,:64]	@ copy counter value
++	sub	sp, sp, #0x10
++
++.Lctr_enc_short_loop:
++	add	r0, sp, #0x10		@ input counter value
++	mov	r1, sp			@ output on the stack
++	mov	r2, r7			@ key
++
++	bl	AES_encrypt
++
++	vld1.8	{q0}, [r4]!	@ load input
++	vld1.8	{q1}, [sp,:64]	@ load encrypted counter
++	add	r8, r8, #1
++#ifdef __ARMEL__
++	rev	r0, r8
++	str	r0, [sp, #0x1c]		@ next counter value
++#else
++	str	r8, [sp, #0x1c]		@ next counter value
++#endif
++	veor	q0,q0,q1
++	vst1.8	{q0}, [r5]!	@ store output
++	subs	r6, r6, #1
++	bne	.Lctr_enc_short_loop
++
++	vmov.i32	q0, #0
++	vmov.i32	q1, #0
++	vstmia		sp!, {q0-q1}
++
++	ldmia	sp!, {r4-r8, pc}
++.size	bsaes_ctr32_encrypt_blocks,.-bsaes_ctr32_encrypt_blocks
++.globl	bsaes_xts_encrypt
++.type	bsaes_xts_encrypt,%function
++.align	4
++bsaes_xts_encrypt:
++	mov	ip, sp
++	stmdb	sp!, {r4-r10, lr}		@ 0x20
++	VFP_ABI_PUSH
++	mov	r6, sp				@ future r3
++
++	mov	r7, r0
++	mov	r8, r1
++	mov	r9, r2
++	mov	r10, r3
++
++	sub	r0, sp, #0x10			@ 0x10
++	bic	r0, #0xf			@ align at 16 bytes
++	mov	sp, r0
++
++#ifdef	XTS_CHAIN_TWEAK
++	ldr	r0, [ip]			@ pointer to input tweak
++#else
++	@ generate initial tweak
++	ldr	r0, [ip, #4]			@ iv[]
++	mov	r1, sp
++	ldr	r2, [ip, #0]			@ key2
++	bl	AES_encrypt
++	mov	r0,sp				@ pointer to initial tweak
++#endif
++
++	ldr	r1, [r10, #240]		@ get # of rounds
++	mov	r3, r6
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	@ allocate the key schedule on the stack
++	sub	r12, sp, r1, lsl#7		@ 128 bytes per inner round key
++	@ add	r12, #96			@ size of bit-sliced key schedule
++	sub	r12, #48			@ place for tweak[9]
++
++	@ populate the key schedule
++	mov	r4, r10			@ pass key
++	mov	r5, r1			@ pass # of rounds
++	mov	sp, r12
++	add	r12, #0x90			@ pass key schedule
++	bl	_bsaes_key_convert
++	veor	q7, q7, q15	@ fix up last round key
++	vstmia	r12, {q7}			@ save last round key
++#else
++	ldr	r12, [r10, #244]
++	eors	r12, #1
++	beq	0f
++
++	str	r12, [r10, #244]
++	mov	r4, r10			@ pass key
++	mov	r5, r1			@ pass # of rounds
++	add	r12, r10, #248			@ pass key schedule
++	bl	_bsaes_key_convert
++	veor	q7, q7, q15	@ fix up last round key
++	vstmia	r12, {q7}
++
++.align	2
++0:	sub	sp, #0x90			@ place for tweak[9]
++#endif
++
++	vld1.8	{q8}, [r0]			@ initial tweak
++	adr	r2, .Lxts_magic
++
++	subs	r9, #0x80
++	blo	.Lxts_enc_short
++	b	.Lxts_enc_loop
++
++.align	4
++.Lxts_enc_loop:
++	vldmia		r2, {q5}	@ load XTS magic
++	vshr.s64	q6, q8, #63
++	mov		r0, sp
++	vand		q6, q6, q5
++	vadd.u64	q9, q8, q8
++	vst1.64		{q8}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q9, #63
++	veor		q9, q9, q6
++	vand		q7, q7, q5
++	vadd.u64	q10, q9, q9
++	vst1.64		{q9}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q10, #63
++	veor		q10, q10, q7
++	vand		q6, q6, q5
++	vld1.8		{q0}, [r7]!
++	vadd.u64	q11, q10, q10
++	vst1.64		{q10}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q11, #63
++	veor		q11, q11, q6
++	vand		q7, q7, q5
++	vld1.8		{q1}, [r7]!
++	veor		q0, q0, q8
++	vadd.u64	q12, q11, q11
++	vst1.64		{q11}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q12, #63
++	veor		q12, q12, q7
++	vand		q6, q6, q5
++	vld1.8		{q2}, [r7]!
++	veor		q1, q1, q9
++	vadd.u64	q13, q12, q12
++	vst1.64		{q12}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q13, #63
++	veor		q13, q13, q6
++	vand		q7, q7, q5
++	vld1.8		{q3}, [r7]!
++	veor		q2, q2, q10
++	vadd.u64	q14, q13, q13
++	vst1.64		{q13}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q14, #63
++	veor		q14, q14, q7
++	vand		q6, q6, q5
++	vld1.8		{q4}, [r7]!
++	veor		q3, q3, q11
++	vadd.u64	q15, q14, q14
++	vst1.64		{q14}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q15, #63
++	veor		q15, q15, q6
++	vand		q7, q7, q5
++	vld1.8		{q5}, [r7]!
++	veor		q4, q4, q12
++	vadd.u64	q8, q15, q15
++	vst1.64		{q15}, [r0,:128]!
++	vswp		d15,d14
++	veor		q8, q8, q7
++	vst1.64		{q8}, [r0,:128]		@ next round tweak
++
++	vld1.8		{q6-q7}, [r7]!
++	veor		q5, q5, q13
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q6, q6, q14
++	mov		r5, r1			@ pass rounds
++	veor		q7, q7, q15
++	mov		r0, sp
++
++	bl		_bsaes_encrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10-q11}, [r0,:128]!
++	veor		q0, q0, q8
++	vld1.64		{q12-q13}, [r0,:128]!
++	veor		q1, q1, q9
++	veor		q8, q4, q10
++	vst1.8		{q0-q1}, [r8]!
++	veor		q9, q6, q11
++	vld1.64		{q14-q15}, [r0,:128]!
++	veor		q10, q3, q12
++	vst1.8		{q8-q9}, [r8]!
++	veor		q11, q7, q13
++	veor		q12, q2, q14
++	vst1.8		{q10-q11}, [r8]!
++	veor		q13, q5, q15
++	vst1.8		{q12-q13}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++
++	subs		r9, #0x80
++	bpl		.Lxts_enc_loop
++
++.Lxts_enc_short:
++	adds		r9, #0x70
++	bmi		.Lxts_enc_done
++
++	vldmia		r2, {q5}	@ load XTS magic
++	vshr.s64	q7, q8, #63
++	mov		r0, sp
++	vand		q7, q7, q5
++	vadd.u64	q9, q8, q8
++	vst1.64		{q8}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q9, #63
++	veor		q9, q9, q7
++	vand		q6, q6, q5
++	vadd.u64	q10, q9, q9
++	vst1.64		{q9}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q10, #63
++	veor		q10, q10, q6
++	vand		q7, q7, q5
++	vld1.8		{q0}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_enc_1
++	vadd.u64	q11, q10, q10
++	vst1.64		{q10}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q11, #63
++	veor		q11, q11, q7
++	vand		q6, q6, q5
++	vld1.8		{q1}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_enc_2
++	veor		q0, q0, q8
++	vadd.u64	q12, q11, q11
++	vst1.64		{q11}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q12, #63
++	veor		q12, q12, q6
++	vand		q7, q7, q5
++	vld1.8		{q2}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_enc_3
++	veor		q1, q1, q9
++	vadd.u64	q13, q12, q12
++	vst1.64		{q12}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q13, #63
++	veor		q13, q13, q7
++	vand		q6, q6, q5
++	vld1.8		{q3}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_enc_4
++	veor		q2, q2, q10
++	vadd.u64	q14, q13, q13
++	vst1.64		{q13}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q14, #63
++	veor		q14, q14, q6
++	vand		q7, q7, q5
++	vld1.8		{q4}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_enc_5
++	veor		q3, q3, q11
++	vadd.u64	q15, q14, q14
++	vst1.64		{q14}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q15, #63
++	veor		q15, q15, q7
++	vand		q6, q6, q5
++	vld1.8		{q5}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_enc_6
++	veor		q4, q4, q12
++	sub		r9, #0x10
++	vst1.64		{q15}, [r0,:128]		@ next round tweak
++
++	vld1.8		{q6}, [r7]!
++	veor		q5, q5, q13
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q6, q6, q14
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_encrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10-q11}, [r0,:128]!
++	veor		q0, q0, q8
++	vld1.64		{q12-q13}, [r0,:128]!
++	veor		q1, q1, q9
++	veor		q8, q4, q10
++	vst1.8		{q0-q1}, [r8]!
++	veor		q9, q6, q11
++	vld1.64		{q14}, [r0,:128]!
++	veor		q10, q3, q12
++	vst1.8		{q8-q9}, [r8]!
++	veor		q11, q7, q13
++	veor		q12, q2, q14
++	vst1.8		{q10-q11}, [r8]!
++	vst1.8		{q12}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_enc_done
++.align	4
++.Lxts_enc_6:
++	vst1.64		{q14}, [r0,:128]		@ next round tweak
++
++	veor		q4, q4, q12
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q5, q5, q13
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_encrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10-q11}, [r0,:128]!
++	veor		q0, q0, q8
++	vld1.64		{q12-q13}, [r0,:128]!
++	veor		q1, q1, q9
++	veor		q8, q4, q10
++	vst1.8		{q0-q1}, [r8]!
++	veor		q9, q6, q11
++	veor		q10, q3, q12
++	vst1.8		{q8-q9}, [r8]!
++	veor		q11, q7, q13
++	vst1.8		{q10-q11}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_enc_done
++
++@ put this in range for both ARM and Thumb mode adr instructions
++.align	5
++.Lxts_magic:
++	.quad	1, 0x87
++
++.align	5
++.Lxts_enc_5:
++	vst1.64		{q13}, [r0,:128]		@ next round tweak
++
++	veor		q3, q3, q11
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q4, q4, q12
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_encrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10-q11}, [r0,:128]!
++	veor		q0, q0, q8
++	vld1.64		{q12}, [r0,:128]!
++	veor		q1, q1, q9
++	veor		q8, q4, q10
++	vst1.8		{q0-q1}, [r8]!
++	veor		q9, q6, q11
++	veor		q10, q3, q12
++	vst1.8		{q8-q9}, [r8]!
++	vst1.8		{q10}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_enc_done
++.align	4
++.Lxts_enc_4:
++	vst1.64		{q12}, [r0,:128]		@ next round tweak
++
++	veor		q2, q2, q10
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q3, q3, q11
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_encrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10-q11}, [r0,:128]!
++	veor		q0, q0, q8
++	veor		q1, q1, q9
++	veor		q8, q4, q10
++	vst1.8		{q0-q1}, [r8]!
++	veor		q9, q6, q11
++	vst1.8		{q8-q9}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_enc_done
++.align	4
++.Lxts_enc_3:
++	vst1.64		{q11}, [r0,:128]		@ next round tweak
++
++	veor		q1, q1, q9
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q2, q2, q10
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_encrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10}, [r0,:128]!
++	veor		q0, q0, q8
++	veor		q1, q1, q9
++	veor		q8, q4, q10
++	vst1.8		{q0-q1}, [r8]!
++	vst1.8		{q8}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_enc_done
++.align	4
++.Lxts_enc_2:
++	vst1.64		{q10}, [r0,:128]		@ next round tweak
++
++	veor		q0, q0, q8
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q1, q1, q9
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_encrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	veor		q0, q0, q8
++	veor		q1, q1, q9
++	vst1.8		{q0-q1}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_enc_done
++.align	4
++.Lxts_enc_1:
++	mov		r0, sp
++	veor		q0, q8
++	mov		r1, sp
++	vst1.8		{q0}, [sp,:128]
++	mov		r2, r10
++	mov		r4, r3				@ preserve fp
++
++	bl		AES_encrypt
++
++	vld1.8		{q0}, [sp,:128]
++	veor		q0, q0, q8
++	vst1.8		{q0}, [r8]!
++	mov		r3, r4
++
++	vmov		q8, q9		@ next round tweak
++
++.Lxts_enc_done:
++#ifndef	XTS_CHAIN_TWEAK
++	adds		r9, #0x10
++	beq		.Lxts_enc_ret
++	sub		r6, r8, #0x10
++
++.Lxts_enc_steal:
++	ldrb		r0, [r7], #1
++	ldrb		r1, [r8, #-0x10]
++	strb		r0, [r8, #-0x10]
++	strb		r1, [r8], #1
++
++	subs		r9, #1
++	bhi		.Lxts_enc_steal
++
++	vld1.8		{q0}, [r6]
++	mov		r0, sp
++	veor		q0, q0, q8
++	mov		r1, sp
++	vst1.8		{q0}, [sp,:128]
++	mov		r2, r10
++	mov		r4, r3			@ preserve fp
++
++	bl		AES_encrypt
++
++	vld1.8		{q0}, [sp,:128]
++	veor		q0, q0, q8
++	vst1.8		{q0}, [r6]
++	mov		r3, r4
++#endif
++
++.Lxts_enc_ret:
++	bic		r0, r3, #0xf
++	vmov.i32	q0, #0
++	vmov.i32	q1, #0
++#ifdef	XTS_CHAIN_TWEAK
++	ldr		r1, [r3, #0x20+VFP_ABI_FRAME]	@ chain tweak
++#endif
++.Lxts_enc_bzero:				@ wipe key schedule [if any]
++	vstmia		sp!, {q0-q1}
++	cmp		sp, r0
++	bne		.Lxts_enc_bzero
++
++	mov		sp, r3
++#ifdef	XTS_CHAIN_TWEAK
++	vst1.8		{q8}, [r1]
++#endif
++	VFP_ABI_POP
++	ldmia		sp!, {r4-r10, pc}	@ return
++
++.size	bsaes_xts_encrypt,.-bsaes_xts_encrypt
++
++.globl	bsaes_xts_decrypt
++.type	bsaes_xts_decrypt,%function
++.align	4
++bsaes_xts_decrypt:
++	mov	ip, sp
++	stmdb	sp!, {r4-r10, lr}		@ 0x20
++	VFP_ABI_PUSH
++	mov	r6, sp				@ future r3
++
++	mov	r7, r0
++	mov	r8, r1
++	mov	r9, r2
++	mov	r10, r3
++
++	sub	r0, sp, #0x10			@ 0x10
++	bic	r0, #0xf			@ align at 16 bytes
++	mov	sp, r0
++
++#ifdef	XTS_CHAIN_TWEAK
++	ldr	r0, [ip]			@ pointer to input tweak
++#else
++	@ generate initial tweak
++	ldr	r0, [ip, #4]			@ iv[]
++	mov	r1, sp
++	ldr	r2, [ip, #0]			@ key2
++	bl	AES_encrypt
++	mov	r0, sp				@ pointer to initial tweak
++#endif
++
++	ldr	r1, [r10, #240]		@ get # of rounds
++	mov	r3, r6
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	@ allocate the key schedule on the stack
++	sub	r12, sp, r1, lsl#7		@ 128 bytes per inner round key
++	@ add	r12, #96			@ size of bit-sliced key schedule
++	sub	r12, #48			@ place for tweak[9]
++
++	@ populate the key schedule
++	mov	r4, r10			@ pass key
++	mov	r5, r1			@ pass # of rounds
++	mov	sp, r12
++	add	r12, #0x90			@ pass key schedule
++	bl	_bsaes_key_convert
++	add	r4, sp, #0x90
++	vldmia	r4, {q6}
++	vstmia	r12,  {q15}		@ save last round key
++	veor	q7, q7, q6	@ fix up round 0 key
++	vstmia	r4, {q7}
++#else
++	ldr	r12, [r10, #244]
++	eors	r12, #1
++	beq	0f
++
++	str	r12, [r10, #244]
++	mov	r4, r10			@ pass key
++	mov	r5, r1			@ pass # of rounds
++	add	r12, r10, #248			@ pass key schedule
++	bl	_bsaes_key_convert
++	add	r4, r10, #248
++	vldmia	r4, {q6}
++	vstmia	r12,  {q15}		@ save last round key
++	veor	q7, q7, q6	@ fix up round 0 key
++	vstmia	r4, {q7}
++
++.align	2
++0:	sub	sp, #0x90			@ place for tweak[9]
++#endif
++	vld1.8	{q8}, [r0]			@ initial tweak
++	adr	r2, .Lxts_magic
++
++#ifndef	XTS_CHAIN_TWEAK
++	tst	r9, #0xf			@ if not multiple of 16
++	it	ne				@ Thumb2 thing, sanity check in ARM
++	subne	r9, #0x10			@ subtract another 16 bytes
++#endif
++	subs	r9, #0x80
++
++	blo	.Lxts_dec_short
++	b	.Lxts_dec_loop
++
++.align	4
++.Lxts_dec_loop:
++	vldmia		r2, {q5}	@ load XTS magic
++	vshr.s64	q6, q8, #63
++	mov		r0, sp
++	vand		q6, q6, q5
++	vadd.u64	q9, q8, q8
++	vst1.64		{q8}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q9, #63
++	veor		q9, q9, q6
++	vand		q7, q7, q5
++	vadd.u64	q10, q9, q9
++	vst1.64		{q9}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q10, #63
++	veor		q10, q10, q7
++	vand		q6, q6, q5
++	vld1.8		{q0}, [r7]!
++	vadd.u64	q11, q10, q10
++	vst1.64		{q10}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q11, #63
++	veor		q11, q11, q6
++	vand		q7, q7, q5
++	vld1.8		{q1}, [r7]!
++	veor		q0, q0, q8
++	vadd.u64	q12, q11, q11
++	vst1.64		{q11}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q12, #63
++	veor		q12, q12, q7
++	vand		q6, q6, q5
++	vld1.8		{q2}, [r7]!
++	veor		q1, q1, q9
++	vadd.u64	q13, q12, q12
++	vst1.64		{q12}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q13, #63
++	veor		q13, q13, q6
++	vand		q7, q7, q5
++	vld1.8		{q3}, [r7]!
++	veor		q2, q2, q10
++	vadd.u64	q14, q13, q13
++	vst1.64		{q13}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q14, #63
++	veor		q14, q14, q7
++	vand		q6, q6, q5
++	vld1.8		{q4}, [r7]!
++	veor		q3, q3, q11
++	vadd.u64	q15, q14, q14
++	vst1.64		{q14}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q15, #63
++	veor		q15, q15, q6
++	vand		q7, q7, q5
++	vld1.8		{q5}, [r7]!
++	veor		q4, q4, q12
++	vadd.u64	q8, q15, q15
++	vst1.64		{q15}, [r0,:128]!
++	vswp		d15,d14
++	veor		q8, q8, q7
++	vst1.64		{q8}, [r0,:128]		@ next round tweak
++
++	vld1.8		{q6-q7}, [r7]!
++	veor		q5, q5, q13
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q6, q6, q14
++	mov		r5, r1			@ pass rounds
++	veor		q7, q7, q15
++	mov		r0, sp
++
++	bl		_bsaes_decrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10-q11}, [r0,:128]!
++	veor		q0, q0, q8
++	vld1.64		{q12-q13}, [r0,:128]!
++	veor		q1, q1, q9
++	veor		q8, q6, q10
++	vst1.8		{q0-q1}, [r8]!
++	veor		q9, q4, q11
++	vld1.64		{q14-q15}, [r0,:128]!
++	veor		q10, q2, q12
++	vst1.8		{q8-q9}, [r8]!
++	veor		q11, q7, q13
++	veor		q12, q3, q14
++	vst1.8		{q10-q11}, [r8]!
++	veor		q13, q5, q15
++	vst1.8		{q12-q13}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++
++	subs		r9, #0x80
++	bpl		.Lxts_dec_loop
++
++.Lxts_dec_short:
++	adds		r9, #0x70
++	bmi		.Lxts_dec_done
++
++	vldmia		r2, {q5}	@ load XTS magic
++	vshr.s64	q7, q8, #63
++	mov		r0, sp
++	vand		q7, q7, q5
++	vadd.u64	q9, q8, q8
++	vst1.64		{q8}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q9, #63
++	veor		q9, q9, q7
++	vand		q6, q6, q5
++	vadd.u64	q10, q9, q9
++	vst1.64		{q9}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q10, #63
++	veor		q10, q10, q6
++	vand		q7, q7, q5
++	vld1.8		{q0}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_dec_1
++	vadd.u64	q11, q10, q10
++	vst1.64		{q10}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q11, #63
++	veor		q11, q11, q7
++	vand		q6, q6, q5
++	vld1.8		{q1}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_dec_2
++	veor		q0, q0, q8
++	vadd.u64	q12, q11, q11
++	vst1.64		{q11}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q12, #63
++	veor		q12, q12, q6
++	vand		q7, q7, q5
++	vld1.8		{q2}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_dec_3
++	veor		q1, q1, q9
++	vadd.u64	q13, q12, q12
++	vst1.64		{q12}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q13, #63
++	veor		q13, q13, q7
++	vand		q6, q6, q5
++	vld1.8		{q3}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_dec_4
++	veor		q2, q2, q10
++	vadd.u64	q14, q13, q13
++	vst1.64		{q13}, [r0,:128]!
++	vswp		d13,d12
++	vshr.s64	q7, q14, #63
++	veor		q14, q14, q6
++	vand		q7, q7, q5
++	vld1.8		{q4}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_dec_5
++	veor		q3, q3, q11
++	vadd.u64	q15, q14, q14
++	vst1.64		{q14}, [r0,:128]!
++	vswp		d15,d14
++	vshr.s64	q6, q15, #63
++	veor		q15, q15, q7
++	vand		q6, q6, q5
++	vld1.8		{q5}, [r7]!
++	subs		r9, #0x10
++	bmi		.Lxts_dec_6
++	veor		q4, q4, q12
++	sub		r9, #0x10
++	vst1.64		{q15}, [r0,:128]		@ next round tweak
++
++	vld1.8		{q6}, [r7]!
++	veor		q5, q5, q13
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q6, q6, q14
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_decrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10-q11}, [r0,:128]!
++	veor		q0, q0, q8
++	vld1.64		{q12-q13}, [r0,:128]!
++	veor		q1, q1, q9
++	veor		q8, q6, q10
++	vst1.8		{q0-q1}, [r8]!
++	veor		q9, q4, q11
++	vld1.64		{q14}, [r0,:128]!
++	veor		q10, q2, q12
++	vst1.8		{q8-q9}, [r8]!
++	veor		q11, q7, q13
++	veor		q12, q3, q14
++	vst1.8		{q10-q11}, [r8]!
++	vst1.8		{q12}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_dec_done
++.align	4
++.Lxts_dec_6:
++	vst1.64		{q14}, [r0,:128]		@ next round tweak
++
++	veor		q4, q4, q12
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q5, q5, q13
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_decrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10-q11}, [r0,:128]!
++	veor		q0, q0, q8
++	vld1.64		{q12-q13}, [r0,:128]!
++	veor		q1, q1, q9
++	veor		q8, q6, q10
++	vst1.8		{q0-q1}, [r8]!
++	veor		q9, q4, q11
++	veor		q10, q2, q12
++	vst1.8		{q8-q9}, [r8]!
++	veor		q11, q7, q13
++	vst1.8		{q10-q11}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_dec_done
++.align	4
++.Lxts_dec_5:
++	vst1.64		{q13}, [r0,:128]		@ next round tweak
++
++	veor		q3, q3, q11
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q4, q4, q12
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_decrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10-q11}, [r0,:128]!
++	veor		q0, q0, q8
++	vld1.64		{q12}, [r0,:128]!
++	veor		q1, q1, q9
++	veor		q8, q6, q10
++	vst1.8		{q0-q1}, [r8]!
++	veor		q9, q4, q11
++	veor		q10, q2, q12
++	vst1.8		{q8-q9}, [r8]!
++	vst1.8		{q10}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_dec_done
++.align	4
++.Lxts_dec_4:
++	vst1.64		{q12}, [r0,:128]		@ next round tweak
++
++	veor		q2, q2, q10
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q3, q3, q11
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_decrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10-q11}, [r0,:128]!
++	veor		q0, q0, q8
++	veor		q1, q1, q9
++	veor		q8, q6, q10
++	vst1.8		{q0-q1}, [r8]!
++	veor		q9, q4, q11
++	vst1.8		{q8-q9}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_dec_done
++.align	4
++.Lxts_dec_3:
++	vst1.64		{q11}, [r0,:128]		@ next round tweak
++
++	veor		q1, q1, q9
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q2, q2, q10
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_decrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	vld1.64		{q10}, [r0,:128]!
++	veor		q0, q0, q8
++	veor		q1, q1, q9
++	veor		q8, q6, q10
++	vst1.8		{q0-q1}, [r8]!
++	vst1.8		{q8}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_dec_done
++.align	4
++.Lxts_dec_2:
++	vst1.64		{q10}, [r0,:128]		@ next round tweak
++
++	veor		q0, q0, q8
++#ifndef	BSAES_ASM_EXTENDED_KEY
++	add		r4, sp, #0x90			@ pass key schedule
++#else
++	add		r4, r10, #248			@ pass key schedule
++#endif
++	veor		q1, q1, q9
++	mov		r5, r1			@ pass rounds
++	mov		r0, sp
++
++	bl		_bsaes_decrypt8
++
++	vld1.64		{q8-q9}, [r0,:128]!
++	veor		q0, q0, q8
++	veor		q1, q1, q9
++	vst1.8		{q0-q1}, [r8]!
++
++	vld1.64		{q8}, [r0,:128]		@ next round tweak
++	b		.Lxts_dec_done
++.align	4
++.Lxts_dec_1:
++	mov		r0, sp
++	veor		q0, q8
++	mov		r1, sp
++	vst1.8		{q0}, [sp,:128]
++	mov		r2, r10
++	mov		r4, r3				@ preserve fp
++	mov		r5, r2			@ preserve magic
++
++	bl		AES_decrypt
++
++	vld1.8		{q0}, [sp,:128]
++	veor		q0, q0, q8
++	vst1.8		{q0}, [r8]!
++	mov		r3, r4
++	mov		r2, r5
++
++	vmov		q8, q9		@ next round tweak
++
++.Lxts_dec_done:
++#ifndef	XTS_CHAIN_TWEAK
++	adds		r9, #0x10
++	beq		.Lxts_dec_ret
++
++	@ calculate one round of extra tweak for the stolen ciphertext
++	vldmia		r2, {q5}
++	vshr.s64	q6, q8, #63
++	vand		q6, q6, q5
++	vadd.u64	q9, q8, q8
++	vswp		d13,d12
++	veor		q9, q9, q6
++
++	@ perform the final decryption with the last tweak value
++	vld1.8		{q0}, [r7]!
++	mov		r0, sp
++	veor		q0, q0, q9
++	mov		r1, sp
++	vst1.8		{q0}, [sp,:128]
++	mov		r2, r10
++	mov		r4, r3			@ preserve fp
++
++	bl		AES_decrypt
++
++	vld1.8		{q0}, [sp,:128]
++	veor		q0, q0, q9
++	vst1.8		{q0}, [r8]
++
++	mov		r6, r8
++.Lxts_dec_steal:
++	ldrb		r1, [r8]
++	ldrb		r0, [r7], #1
++	strb		r1, [r8, #0x10]
++	strb		r0, [r8], #1
++
++	subs		r9, #1
++	bhi		.Lxts_dec_steal
++
++	vld1.8		{q0}, [r6]
++	mov		r0, sp
++	veor		q0, q8
++	mov		r1, sp
++	vst1.8		{q0}, [sp,:128]
++	mov		r2, r10
++
++	bl		AES_decrypt
++
++	vld1.8		{q0}, [sp,:128]
++	veor		q0, q0, q8
++	vst1.8		{q0}, [r6]
++	mov		r3, r4
++#endif
++
++.Lxts_dec_ret:
++	bic		r0, r3, #0xf
++	vmov.i32	q0, #0
++	vmov.i32	q1, #0
++#ifdef	XTS_CHAIN_TWEAK
++	ldr		r1, [r3, #0x20+VFP_ABI_FRAME]	@ chain tweak
++#endif
++.Lxts_dec_bzero:				@ wipe key schedule [if any]
++	vstmia		sp!, {q0-q1}
++	cmp		sp, r0
++	bne		.Lxts_dec_bzero
++
++	mov		sp, r3
++#ifdef	XTS_CHAIN_TWEAK
++	vst1.8		{q8}, [r1]
++#endif
++	VFP_ABI_POP
++	ldmia		sp!, {r4-r10, pc}	@ return
++
++.size	bsaes_xts_decrypt,.-bsaes_xts_decrypt
++#endif
+diff -urNp linux/arch/arm/include/uapi/asm/unistd.h linux-hao/arch/arm/include/uapi/asm/unistd.h
+--- linux/arch/arm/include/uapi/asm/unistd.h	2017-10-07 00:57:02.923504511 +0000
++++ linux-hao/arch/arm/include/uapi/asm/unistd.h	2017-10-06 05:06:57.497332259 +0000
+@@ -84,7 +84,7 @@
+ 					/* 56 was sys_mpx */
+ #define __NR_setpgid			(__NR_SYSCALL_BASE+ 57)
+ 					/* 58 was sys_ulimit */
+-					/* 59 was sys_olduname */
++#define __NR_haole			(__NR_SYSCALL_BASE+ 59)					/* 59 was sys_olduname */
+ #define __NR_umask			(__NR_SYSCALL_BASE+ 60)
+ #define __NR_chroot			(__NR_SYSCALL_BASE+ 61)
+ #define __NR_ustat			(__NR_SYSCALL_BASE+ 62)
+diff -urNp linux/arch/arm/kernel/calls.S linux-hao/arch/arm/kernel/calls.S
+--- linux/arch/arm/kernel/calls.S	2017-10-07 00:57:02.923504511 +0000
++++ linux-hao/arch/arm/kernel/calls.S	2017-10-06 05:02:24.419901352 +0000
+@@ -68,7 +68,7 @@
+ 		CALL(sys_ni_syscall)		/* was sys_mpx */
+ 		CALL(sys_setpgid)
+ 		CALL(sys_ni_syscall)		/* was sys_ulimit */
+-		CALL(sys_ni_syscall)		/* was sys_olduname */
++		CALL(sys_haole)		/* was sys_olduname */
+ /* 60 */	CALL(sys_umask)
+ 		CALL(sys_chroot)
+ 		CALL(sys_ustat)
+diff -urNp linux/arch/arm/kernel/sys_arm.c linux-hao/arch/arm/kernel/sys_arm.c
+--- linux/arch/arm/kernel/sys_arm.c	2017-10-07 00:57:02.933504421 +0000
++++ linux-hao/arch/arm/kernel/sys_arm.c	2017-10-06 05:09:51.776481931 +0000
+@@ -37,3 +37,8 @@ asmlinkage long sys_arm_fadvise64_64(int
+ {
+ 	return sys_fadvise64_64(fd, offset, len, advice);
+ }
++asmlinkage long sys_haole()
++{
++	printk("Hello World, Hao Le\n");
++	return 0;
++}
+diff -urNp linux/arch/arm/xen/mm.c linux-hao/arch/arm/xen/mm.c
+--- linux/arch/arm/xen/mm.c	2017-10-07 00:57:03.343500721 +0000
++++ linux-hao/arch/arm/xen/mm.c	2017-10-05 04:06:45.477496604 +0000
+@@ -199,7 +199,6 @@ static struct dma_map_ops xen_swiotlb_dm
+ 	.unmap_page = xen_swiotlb_unmap_page,
+ 	.dma_supported = xen_swiotlb_dma_supported,
+ 	.set_dma_mask = xen_swiotlb_set_dma_mask,
+-	.mmap = xen_swiotlb_dma_mmap,
+ };
+ 
+ int __init xen_mm_init(void)
+diff -urNp linux/arch/arm64/kernel/head.S linux-hao/arch/arm64/kernel/head.S
+--- linux/arch/arm64/kernel/head.S	2017-10-07 00:57:03.413500089 +0000
++++ linux-hao/arch/arm64/kernel/head.S	2017-10-05 04:06:45.557496153 +0000
+@@ -486,7 +486,6 @@ ENTRY(kimage_vaddr)
+  * booted in EL1 or EL2 respectively.
+  */
+ ENTRY(el2_setup)
+-	msr	SPsel, #1			// We want to use SP_EL{1,2}
+ 	mrs	x0, CurrentEL
+ 	cmp	x0, #CurrentEL_EL2
+ 	b.ne	1f
+diff -urNp linux/arch/arm64/mm/fault.c linux-hao/arch/arm64/mm/fault.c
+--- linux/arch/arm64/mm/fault.c	2017-10-07 00:57:03.443499819 +0000
++++ linux-hao/arch/arm64/mm/fault.c	2017-10-05 04:06:45.587495984 +0000
+@@ -509,7 +509,7 @@ static const struct fault_info fault_inf
+ 	{ do_translation_fault,	SIGSEGV, SEGV_MAPERR,	"level 0 translation fault"	},
+ 	{ do_translation_fault,	SIGSEGV, SEGV_MAPERR,	"level 1 translation fault"	},
+ 	{ do_translation_fault,	SIGSEGV, SEGV_MAPERR,	"level 2 translation fault"	},
+-	{ do_translation_fault,	SIGSEGV, SEGV_MAPERR,	"level 3 translation fault"	},
++	{ do_page_fault,	SIGSEGV, SEGV_MAPERR,	"level 3 translation fault"	},
+ 	{ do_bad,		SIGBUS,  0,		"unknown 8"			},
+ 	{ do_page_fault,	SIGSEGV, SEGV_ACCERR,	"level 1 access flag fault"	},
+ 	{ do_page_fault,	SIGSEGV, SEGV_ACCERR,	"level 2 access flag fault"	},
+diff -urNp linux/arch/powerpc/kernel/entry_64.S linux-hao/arch/powerpc/kernel/entry_64.S
+--- linux/arch/powerpc/kernel/entry_64.S	2017-10-07 00:57:14.313400123 +0000
++++ linux-hao/arch/powerpc/kernel/entry_64.S	2017-10-05 04:06:47.047487756 +0000
+@@ -1235,14 +1235,10 @@ _GLOBAL(ftrace_caller)
+ 	stdu	r1,-SWITCH_FRAME_SIZE(r1)
+ 
+ 	/* Save all gprs to pt_regs */
+-	SAVE_GPR(0, r1)
+-	SAVE_10GPRS(2, r1)
+-	SAVE_10GPRS(12, r1)
+-	SAVE_10GPRS(22, r1)
+-
+-	/* Save previous stack pointer (r1) */
+-	addi	r8, r1, SWITCH_FRAME_SIZE
+-	std	r8, GPR1(r1)
++	SAVE_8GPRS(0,r1)
++	SAVE_8GPRS(8,r1)
++	SAVE_8GPRS(16,r1)
++	SAVE_8GPRS(24,r1)
+ 
+ 	/* Load special regs for save below */
+ 	mfmsr   r8
+@@ -1296,10 +1292,10 @@ ftrace_call:
+ #endif
+ 
+ 	/* Restore gprs */
+-	REST_GPR(0,r1)
+-	REST_10GPRS(2,r1)
+-	REST_10GPRS(12,r1)
+-	REST_10GPRS(22,r1)
++	REST_8GPRS(0,r1)
++	REST_8GPRS(8,r1)
++	REST_8GPRS(16,r1)
++	REST_8GPRS(24,r1)
+ 
+ 	/* Restore callee's TOC */
+ 	ld	r2, 24(r1)
+diff -urNp linux/arch/powerpc/kernel/ptrace.c linux-hao/arch/powerpc/kernel/ptrace.c
+--- linux/arch/powerpc/kernel/ptrace.c	2017-10-07 00:57:14.343399843 +0000
++++ linux-hao/arch/powerpc/kernel/ptrace.c	2017-10-05 04:06:47.077487587 +0000
+@@ -131,7 +131,7 @@ static void flush_tmregs_to_thread(struc
+ 	 * in the appropriate thread structures from live.
+ 	 */
+ 
+-	if ((!cpu_has_feature(CPU_FTR_TM)) || (tsk != current))
++	if (tsk != current)
+ 		return;
+ 
+ 	if (MSR_TM_SUSPENDED(mfmsr())) {
+diff -urNp linux/arch/powerpc/kvm/book3s_64_vio.c linux-hao/arch/powerpc/kvm/book3s_64_vio.c
+--- linux/arch/powerpc/kvm/book3s_64_vio.c	2017-10-07 00:57:14.363399657 +0000
++++ linux-hao/arch/powerpc/kvm/book3s_64_vio.c	2017-10-05 04:06:47.097487474 +0000
+@@ -129,11 +129,8 @@ static int kvm_spapr_tce_mmap(struct fil
+ static int kvm_spapr_tce_release(struct inode *inode, struct file *filp)
+ {
+ 	struct kvmppc_spapr_tce_table *stt = filp->private_data;
+-	struct kvm *kvm = stt->kvm;
+ 
+-	mutex_lock(&kvm->lock);
+ 	list_del_rcu(&stt->list);
+-	mutex_unlock(&kvm->lock);
+ 
+ 	kvm_put_kvm(stt->kvm);
+ 
+@@ -153,7 +150,6 @@ long kvm_vm_ioctl_create_spapr_tce(struc
+ 				   struct kvm_create_spapr_tce_64 *args)
+ {
+ 	struct kvmppc_spapr_tce_table *stt = NULL;
+-	struct kvmppc_spapr_tce_table *siter;
+ 	unsigned long npages, size;
+ 	int ret = -ENOMEM;
+ 	int i;
+@@ -161,16 +157,24 @@ long kvm_vm_ioctl_create_spapr_tce(struc
+ 	if (!args->size)
+ 		return -EINVAL;
+ 
++	/* Check this LIOBN hasn't been previously allocated */
++	list_for_each_entry(stt, &kvm->arch.spapr_tce_tables, list) {
++		if (stt->liobn == args->liobn)
++			return -EBUSY;
++	}
++
+ 	size = args->size;
+ 	npages = kvmppc_tce_pages(size);
+ 	ret = kvmppc_account_memlimit(kvmppc_stt_pages(npages), true);
+-	if (ret)
+-		return ret;
++	if (ret) {
++		stt = NULL;
++		goto fail;
++	}
+ 
+ 	stt = kzalloc(sizeof(*stt) + npages * sizeof(struct page *),
+ 		      GFP_KERNEL);
+ 	if (!stt)
+-		goto fail_acct;
++		goto fail;
+ 
+ 	stt->liobn = args->liobn;
+ 	stt->page_shift = args->page_shift;
+@@ -184,39 +188,24 @@ long kvm_vm_ioctl_create_spapr_tce(struc
+ 			goto fail;
+ 	}
+ 
+-	mutex_lock(&kvm->lock);
+-
+-	/* Check this LIOBN hasn't been previously allocated */
+-	ret = 0;
+-	list_for_each_entry(siter, &kvm->arch.spapr_tce_tables, list) {
+-		if (siter->liobn == args->liobn) {
+-			ret = -EBUSY;
+-			break;
+-		}
+-	}
++	kvm_get_kvm(kvm);
+ 
+-	if (!ret)
+-		ret = anon_inode_getfd("kvm-spapr-tce", &kvm_spapr_tce_fops,
+-				       stt, O_RDWR | O_CLOEXEC);
+-
+-	if (ret >= 0) {
+-		list_add_rcu(&stt->list, &kvm->arch.spapr_tce_tables);
+-		kvm_get_kvm(kvm);
+-	}
++	mutex_lock(&kvm->lock);
++	list_add_rcu(&stt->list, &kvm->arch.spapr_tce_tables);
+ 
+ 	mutex_unlock(&kvm->lock);
+ 
+-	if (ret >= 0)
+-		return ret;
++	return anon_inode_getfd("kvm-spapr-tce", &kvm_spapr_tce_fops,
++				stt, O_RDWR | O_CLOEXEC);
++
++fail:
++	if (stt) {
++		for (i = 0; i < npages; i++)
++			if (stt->pages[i])
++				__free_page(stt->pages[i]);
+ 
+- fail:
+-	for (i = 0; i < npages; i++)
+-		if (stt->pages[i])
+-			__free_page(stt->pages[i]);
+-
+-	kfree(stt);
+- fail_acct:
+-	kvmppc_account_memlimit(kvmppc_stt_pages(npages), false);
++		kfree(stt);
++	}
+ 	return ret;
+ }
+ 
+diff -urNp linux/arch/powerpc/platforms/pseries/mobility.c linux-hao/arch/powerpc/platforms/pseries/mobility.c
+--- linux/arch/powerpc/platforms/pseries/mobility.c	2017-10-07 00:57:14.503398352 +0000
++++ linux-hao/arch/powerpc/platforms/pseries/mobility.c	2017-10-05 04:06:47.237486685 +0000
+@@ -225,10 +225,8 @@ static int add_dt_node(__be32 parent_pha
+ 		return -ENOENT;
+ 
+ 	dn = dlpar_configure_connector(drc_index, parent_dn);
+-	if (!dn) {
+-		of_node_put(parent_dn);
++	if (!dn)
+ 		return -ENOENT;
+-	}
+ 
+ 	rc = dlpar_attach_node(dn);
+ 	if (rc)
+diff -urNp linux/arch/s390/mm/gup.c linux-hao/arch/s390/mm/gup.c
+--- linux/arch/s390/mm/gup.c	2017-10-07 00:57:14.603397420 +0000
++++ linux-hao/arch/s390/mm/gup.c	2017-10-05 04:06:47.337486121 +0000
+@@ -56,12 +56,13 @@ static inline int gup_pte_range(pmd_t *p
+ static inline int gup_huge_pmd(pmd_t *pmdp, pmd_t pmd, unsigned long addr,
+ 		unsigned long end, int write, struct page **pages, int *nr)
+ {
++	unsigned long mask, result;
+ 	struct page *head, *page;
+-	unsigned long mask;
+ 	int refs;
+ 
+-	mask = (write ? _SEGMENT_ENTRY_PROTECT : 0) | _SEGMENT_ENTRY_INVALID;
+-	if ((pmd_val(pmd) & mask) != 0)
++	result = write ? 0 : _SEGMENT_ENTRY_PROTECT;
++	mask = result | _SEGMENT_ENTRY_INVALID;
++	if ((pmd_val(pmd) & mask) != result)
+ 		return 0;
+ 	VM_BUG_ON(!pfn_valid(pmd_val(pmd) >> PAGE_SHIFT));
+ 
+diff -urNp linux/arch/x86/kernel/fpu/regset.c linux-hao/arch/x86/kernel/fpu/regset.c
+--- linux/arch/x86/kernel/fpu/regset.c	2017-10-07 00:57:16.243382095 +0000
++++ linux-hao/arch/x86/kernel/fpu/regset.c	2017-10-05 04:07:22.007290674 +0000
+@@ -130,16 +130,11 @@ int xstateregs_set(struct task_struct *t
+ 
+ 	fpu__activate_fpstate_write(fpu);
+ 
+-	if (boot_cpu_has(X86_FEATURE_XSAVES)) {
++	if (boot_cpu_has(X86_FEATURE_XSAVES))
+ 		ret = copyin_to_xsaves(kbuf, ubuf, xsave);
+-	} else {
++	else
+ 		ret = user_regset_copyin(&pos, &count, &kbuf, &ubuf, xsave, 0, -1);
+ 
+-		/* xcomp_bv must be 0 when using uncompacted format */
+-		if (!ret && xsave->header.xcomp_bv)
+-			ret = -EINVAL;
+-	}
+-
+ 	/*
+ 	 * In case of failure, mark all states as init:
+ 	 */
+diff -urNp linux/arch/x86/kernel/fpu/signal.c linux-hao/arch/x86/kernel/fpu/signal.c
+--- linux/arch/x86/kernel/fpu/signal.c	2017-10-07 00:57:16.243382095 +0000
++++ linux-hao/arch/x86/kernel/fpu/signal.c	2017-10-05 04:07:22.007290674 +0000
+@@ -329,10 +329,6 @@ static int __fpu__restore_sig(void __use
+ 		} else {
+ 			err = __copy_from_user(&fpu->state.xsave,
+ 					       buf_fx, state_size);
+-
+-			/* xcomp_bv must be 0 when using uncompacted format */
+-			if (!err && state_size > offsetof(struct xregs_state, header) && fpu->state.xsave.header.xcomp_bv)
+-				err = -EINVAL;
+ 		}
+ 
+ 		if (err || __copy_from_user(&env, buf, sizeof(env))) {
+diff -urNp linux/arch/x86/kernel/kvm.c linux-hao/arch/x86/kernel/kvm.c
+--- linux/arch/x86/kernel/kvm.c	2017-10-07 00:57:16.253382002 +0000
++++ linux-hao/arch/x86/kernel/kvm.c	2017-10-05 04:07:22.627287178 +0000
+@@ -141,8 +141,7 @@ void kvm_async_pf_task_wait(u32 token)
+ 
+ 	n.token = token;
+ 	n.cpu = smp_processor_id();
+-	n.halted = is_idle_task(current) || preempt_count() > 1 ||
+-		   rcu_preempt_depth();
++	n.halted = is_idle_task(current) || preempt_count() > 1;
+ 	init_swait_queue_head(&n.wq);
+ 	hlist_add_head(&n.link, &b->list);
+ 	raw_spin_unlock(&b->lock);
+diff -urNp linux/arch/x86/kvm/vmx.c linux-hao/arch/x86/kvm/vmx.c
+--- linux/arch/x86/kvm/vmx.c	2017-10-07 00:57:16.293381627 +0000
++++ linux-hao/arch/x86/kvm/vmx.c	2017-10-05 04:07:24.407277141 +0000
+@@ -2167,44 +2167,46 @@ static void vmx_vcpu_pi_load(struct kvm_
+ 	struct pi_desc old, new;
+ 	unsigned int dest;
+ 
+-	/*
+-	 * In case of hot-plug or hot-unplug, we may have to undo
+-	 * vmx_vcpu_pi_put even if there is no assigned device.  And we
+-	 * always keep PI.NDST up to date for simplicity: it makes the
+-	 * code easier, and CPU migration is not a fast path.
+-	 */
+-	if (!pi_test_sn(pi_desc) && vcpu->cpu == cpu)
+-		return;
+-
+-	/*
+-	 * First handle the simple case where no cmpxchg is necessary; just
+-	 * allow posting non-urgent interrupts.
+-	 *
+-	 * If the 'nv' field is POSTED_INTR_WAKEUP_VECTOR, do not change
+-	 * PI.NDST: pi_post_block will do it for us and the wakeup_handler
+-	 * expects the VCPU to be on the blocked_vcpu_list that matches
+-	 * PI.NDST.
+-	 */
+-	if (pi_desc->nv == POSTED_INTR_WAKEUP_VECTOR ||
+-	    vcpu->cpu == cpu) {
+-		pi_clear_sn(pi_desc);
++	if (!kvm_arch_has_assigned_device(vcpu->kvm) ||
++		!irq_remapping_cap(IRQ_POSTING_CAP)  ||
++		!kvm_vcpu_apicv_active(vcpu))
+ 		return;
+-	}
+ 
+-	/* The full case.  */
+ 	do {
+ 		old.control = new.control = pi_desc->control;
+ 
+-		dest = cpu_physical_id(cpu);
++		/*
++		 * If 'nv' field is POSTED_INTR_WAKEUP_VECTOR, there
++		 * are two possible cases:
++		 * 1. After running 'pre_block', context switch
++		 *    happened. For this case, 'sn' was set in
++		 *    vmx_vcpu_put(), so we need to clear it here.
++		 * 2. After running 'pre_block', we were blocked,
++		 *    and woken up by some other guy. For this case,
++		 *    we don't need to do anything, 'pi_post_block'
++		 *    will do everything for us. However, we cannot
++		 *    check whether it is case #1 or case #2 here
++		 *    (maybe, not needed), so we also clear sn here,
++		 *    I think it is not a big deal.
++		 */
++		if (pi_desc->nv != POSTED_INTR_WAKEUP_VECTOR) {
++			if (vcpu->cpu != cpu) {
++				dest = cpu_physical_id(cpu);
++
++				if (x2apic_enabled())
++					new.ndst = dest;
++				else
++					new.ndst = (dest << 8) & 0xFF00;
++			}
+ 
+-		if (x2apic_enabled())
+-			new.ndst = dest;
+-		else
+-			new.ndst = (dest << 8) & 0xFF00;
++			/* set 'NV' to 'notification vector' */
++			new.nv = POSTED_INTR_VECTOR;
++		}
+ 
++		/* Allow posting non-urgent interrupts */
+ 		new.sn = 0;
+-	} while (cmpxchg64(&pi_desc->control, old.control,
+-			   new.control) != old.control);
++	} while (cmpxchg(&pi_desc->control, old.control,
++			new.control) != old.control);
+ }
+ 
+ static void decache_tsc_multiplier(struct vcpu_vmx *vmx)
+@@ -4759,30 +4761,21 @@ static inline bool kvm_vcpu_trigger_post
+ {
+ #ifdef CONFIG_SMP
+ 	if (vcpu->mode == IN_GUEST_MODE) {
++		struct vcpu_vmx *vmx = to_vmx(vcpu);
++
+ 		/*
+-		 * The vector of interrupt to be delivered to vcpu had
+-		 * been set in PIR before this function.
+-		 *
+-		 * Following cases will be reached in this block, and
+-		 * we always send a notification event in all cases as
+-		 * explained below.
+-		 *
+-		 * Case 1: vcpu keeps in non-root mode. Sending a
+-		 * notification event posts the interrupt to vcpu.
+-		 *
+-		 * Case 2: vcpu exits to root mode and is still
+-		 * runnable. PIR will be synced to vIRR before the
+-		 * next vcpu entry. Sending a notification event in
+-		 * this case has no effect, as vcpu is not in root
+-		 * mode.
++		 * Currently, we don't support urgent interrupt,
++		 * all interrupts are recognized as non-urgent
++		 * interrupt, so we cannot post interrupts when
++		 * 'SN' is set.
+ 		 *
+-		 * Case 3: vcpu exits to root mode and is blocked.
+-		 * vcpu_block() has already synced PIR to vIRR and
+-		 * never blocks vcpu if vIRR is not cleared. Therefore,
+-		 * a blocked vcpu here does not wait for any requested
+-		 * interrupts in PIR, and sending a notification event
+-		 * which has no effect is safe here.
++		 * If the vcpu is in guest mode, it means it is
++		 * running instead of being scheduled out and
++		 * waiting in the run queue, and that's the only
++		 * case when 'SN' is set currently, warning if
++		 * 'SN' is set.
+ 		 */
++		WARN_ON_ONCE(pi_test_sn(&vmx->pi_desc));
+ 
+ 		apic->send_IPI_mask(get_cpu_mask(vcpu->cpu),
+ 				POSTED_INTR_VECTOR);
+@@ -9194,13 +9187,6 @@ static struct kvm_vcpu *vmx_create_vcpu(
+ 
+ 	vmx->msr_ia32_feature_control_valid_bits = FEATURE_CONTROL_LOCKED;
+ 
+-	/*
+-	 * Enforce invariant: pi_desc.nv is always either POSTED_INTR_VECTOR
+-	 * or POSTED_INTR_WAKEUP_VECTOR.
+-	 */
+-	vmx->pi_desc.nv = POSTED_INTR_VECTOR;
+-	vmx->pi_desc.sn = 1;
+-
+ 	return &vmx->vcpu;
+ 
+ free_vmcs:
+@@ -10010,11 +9996,6 @@ static void prepare_vmcs02(struct kvm_vc
+ 		vmcs_write64(VIRTUAL_APIC_PAGE_ADDR,
+ 				page_to_phys(vmx->nested.virtual_apic_page));
+ 		vmcs_write32(TPR_THRESHOLD, vmcs12->tpr_threshold);
+-	} else {
+-#ifdef CONFIG_X86_64
+-		exec_control |= CPU_BASED_CR8_LOAD_EXITING |
+-				CPU_BASED_CR8_STORE_EXITING;
+-#endif
+ 	}
+ 
+ 	if (cpu_has_vmx_msr_bitmap() &&
+@@ -11019,37 +11000,6 @@ static void vmx_enable_log_dirty_pt_mask
+ 	kvm_mmu_clear_dirty_pt_masked(kvm, memslot, offset, mask);
+ }
+ 
+-static void __pi_post_block(struct kvm_vcpu *vcpu)
+-{
+-	struct pi_desc *pi_desc = vcpu_to_pi_desc(vcpu);
+-	struct pi_desc old, new;
+-	unsigned int dest;
+-
+-	do {
+-		old.control = new.control = pi_desc->control;
+-		WARN(old.nv != POSTED_INTR_WAKEUP_VECTOR,
+-		     "Wakeup handler not enabled while the VCPU is blocked\n");
+-
+-		dest = cpu_physical_id(vcpu->cpu);
+-
+-		if (x2apic_enabled())
+-			new.ndst = dest;
+-		else
+-			new.ndst = (dest << 8) & 0xFF00;
+-
+-		/* set 'NV' to 'notification vector' */
+-		new.nv = POSTED_INTR_VECTOR;
+-	} while (cmpxchg64(&pi_desc->control, old.control,
+-			   new.control) != old.control);
+-
+-	if (!WARN_ON_ONCE(vcpu->pre_pcpu == -1)) {
+-		spin_lock(&per_cpu(blocked_vcpu_on_cpu_lock, vcpu->pre_pcpu));
+-		list_del(&vcpu->blocked_vcpu_list);
+-		spin_unlock(&per_cpu(blocked_vcpu_on_cpu_lock, vcpu->pre_pcpu));
+-		vcpu->pre_pcpu = -1;
+-	}
+-}
+-
+ /*
+  * This routine does the following things for vCPU which is going
+  * to be blocked if VT-d PI is enabled.
+@@ -11065,6 +11015,7 @@ static void __pi_post_block(struct kvm_v
+  */
+ static int pi_pre_block(struct kvm_vcpu *vcpu)
+ {
++	unsigned long flags;
+ 	unsigned int dest;
+ 	struct pi_desc old, new;
+ 	struct pi_desc *pi_desc = vcpu_to_pi_desc(vcpu);
+@@ -11074,20 +11025,34 @@ static int pi_pre_block(struct kvm_vcpu
+ 		!kvm_vcpu_apicv_active(vcpu))
+ 		return 0;
+ 
+-	WARN_ON(irqs_disabled());
+-	local_irq_disable();
+-	if (!WARN_ON_ONCE(vcpu->pre_pcpu != -1)) {
+-		vcpu->pre_pcpu = vcpu->cpu;
+-		spin_lock(&per_cpu(blocked_vcpu_on_cpu_lock, vcpu->pre_pcpu));
+-		list_add_tail(&vcpu->blocked_vcpu_list,
+-			      &per_cpu(blocked_vcpu_on_cpu,
+-				       vcpu->pre_pcpu));
+-		spin_unlock(&per_cpu(blocked_vcpu_on_cpu_lock, vcpu->pre_pcpu));
+-	}
++	vcpu->pre_pcpu = vcpu->cpu;
++	spin_lock_irqsave(&per_cpu(blocked_vcpu_on_cpu_lock,
++			  vcpu->pre_pcpu), flags);
++	list_add_tail(&vcpu->blocked_vcpu_list,
++		      &per_cpu(blocked_vcpu_on_cpu,
++		      vcpu->pre_pcpu));
++	spin_unlock_irqrestore(&per_cpu(blocked_vcpu_on_cpu_lock,
++			       vcpu->pre_pcpu), flags);
+ 
+ 	do {
+ 		old.control = new.control = pi_desc->control;
+ 
++		/*
++		 * We should not block the vCPU if
++		 * an interrupt is posted for it.
++		 */
++		if (pi_test_on(pi_desc) == 1) {
++			spin_lock_irqsave(&per_cpu(blocked_vcpu_on_cpu_lock,
++					  vcpu->pre_pcpu), flags);
++			list_del(&vcpu->blocked_vcpu_list);
++			spin_unlock_irqrestore(
++					&per_cpu(blocked_vcpu_on_cpu_lock,
++					vcpu->pre_pcpu), flags);
++			vcpu->pre_pcpu = -1;
++
++			return 1;
++		}
++
+ 		WARN((pi_desc->sn == 1),
+ 		     "Warning: SN field of posted-interrupts "
+ 		     "is set before blocking\n");
+@@ -11109,15 +11074,10 @@ static int pi_pre_block(struct kvm_vcpu
+ 
+ 		/* set 'NV' to 'wakeup vector' */
+ 		new.nv = POSTED_INTR_WAKEUP_VECTOR;
+-	} while (cmpxchg64(&pi_desc->control, old.control,
+-			   new.control) != old.control);
+-
+-	/* We should not block the vCPU if an interrupt is posted for it.  */
+-	if (pi_test_on(pi_desc) == 1)
+-		__pi_post_block(vcpu);
++	} while (cmpxchg(&pi_desc->control, old.control,
++			new.control) != old.control);
+ 
+-	local_irq_enable();
+-	return (vcpu->pre_pcpu == -1);
++	return 0;
+ }
+ 
+ static int vmx_pre_block(struct kvm_vcpu *vcpu)
+@@ -11133,13 +11093,44 @@ static int vmx_pre_block(struct kvm_vcpu
+ 
+ static void pi_post_block(struct kvm_vcpu *vcpu)
+ {
+-	if (vcpu->pre_pcpu == -1)
++	struct pi_desc *pi_desc = vcpu_to_pi_desc(vcpu);
++	struct pi_desc old, new;
++	unsigned int dest;
++	unsigned long flags;
++
++	if (!kvm_arch_has_assigned_device(vcpu->kvm) ||
++		!irq_remapping_cap(IRQ_POSTING_CAP)  ||
++		!kvm_vcpu_apicv_active(vcpu))
+ 		return;
+ 
+-	WARN_ON(irqs_disabled());
+-	local_irq_disable();
+-	__pi_post_block(vcpu);
+-	local_irq_enable();
++	do {
++		old.control = new.control = pi_desc->control;
++
++		dest = cpu_physical_id(vcpu->cpu);
++
++		if (x2apic_enabled())
++			new.ndst = dest;
++		else
++			new.ndst = (dest << 8) & 0xFF00;
++
++		/* Allow posting non-urgent interrupts */
++		new.sn = 0;
++
++		/* set 'NV' to 'notification vector' */
++		new.nv = POSTED_INTR_VECTOR;
++	} while (cmpxchg(&pi_desc->control, old.control,
++			new.control) != old.control);
++
++	if(vcpu->pre_pcpu != -1) {
++		spin_lock_irqsave(
++			&per_cpu(blocked_vcpu_on_cpu_lock,
++			vcpu->pre_pcpu), flags);
++		list_del(&vcpu->blocked_vcpu_list);
++		spin_unlock_irqrestore(
++			&per_cpu(blocked_vcpu_on_cpu_lock,
++			vcpu->pre_pcpu), flags);
++		vcpu->pre_pcpu = -1;
++	}
+ }
+ 
+ static void vmx_post_block(struct kvm_vcpu *vcpu)
+@@ -11167,7 +11158,7 @@ static int vmx_update_pi_irte(struct kvm
+ 	struct kvm_lapic_irq irq;
+ 	struct kvm_vcpu *vcpu;
+ 	struct vcpu_data vcpu_info;
+-	int idx, ret = 0;
++	int idx, ret = -EINVAL;
+ 
+ 	if (!kvm_arch_has_assigned_device(kvm) ||
+ 		!irq_remapping_cap(IRQ_POSTING_CAP) ||
+@@ -11176,12 +11167,7 @@ static int vmx_update_pi_irte(struct kvm
+ 
+ 	idx = srcu_read_lock(&kvm->irq_srcu);
+ 	irq_rt = srcu_dereference(kvm->irq_routing, &kvm->irq_srcu);
+-	if (guest_irq >= irq_rt->nr_rt_entries ||
+-	    hlist_empty(&irq_rt->map[guest_irq])) {
+-		pr_warn_once("no route for guest_irq %u/%u (broken user space?)\n",
+-			     guest_irq, irq_rt->nr_rt_entries);
+-		goto out;
+-	}
++	BUG_ON(guest_irq >= irq_rt->nr_rt_entries);
+ 
+ 	hlist_for_each_entry(e, &irq_rt->map[guest_irq], link) {
+ 		if (e->type != KVM_IRQ_ROUTING_MSI)
+@@ -11224,8 +11210,12 @@ static int vmx_update_pi_irte(struct kvm
+ 
+ 		if (set)
+ 			ret = irq_set_vcpu_affinity(host_irq, &vcpu_info);
+-		else
++		else {
++			/* suppress notification event before unposting */
++			pi_set_sn(vcpu_to_pi_desc(vcpu));
+ 			ret = irq_set_vcpu_affinity(host_irq, NULL);
++			pi_clear_sn(vcpu_to_pi_desc(vcpu));
++		}
+ 
+ 		if (ret < 0) {
+ 			printk(KERN_INFO "%s: failed to update PI IRTE\n",
+diff -urNp linux/arch/x86/mm/fault.c linux-hao/arch/x86/mm/fault.c
+--- linux/arch/x86/mm/fault.c	2017-10-07 00:57:16.323381346 +0000
++++ linux-hao/arch/x86/mm/fault.c	2017-10-05 04:07:24.447276915 +0000
+@@ -191,7 +191,8 @@ is_prefetch(struct pt_regs *regs, unsign
+  * 6. T1   : reaches here, sees vma_pkey(vma)=5, when we really
+  *	     faulted on a pte with its pkey=4.
+  */
+-static void fill_sig_info_pkey(int si_code, siginfo_t *info, u32 *pkey)
++static void fill_sig_info_pkey(int si_code, siginfo_t *info,
++		struct vm_area_struct *vma)
+ {
+ 	/* This is effectively an #ifdef */
+ 	if (!boot_cpu_has(X86_FEATURE_OSPKE))
+@@ -207,7 +208,7 @@ static void fill_sig_info_pkey(int si_co
+ 	 * valid VMA, so we should never reach this without a
+ 	 * valid VMA.
+ 	 */
+-	if (!pkey) {
++	if (!vma) {
+ 		WARN_ONCE(1, "PKU fault with no VMA passed in");
+ 		info->si_pkey = 0;
+ 		return;
+@@ -217,12 +218,13 @@ static void fill_sig_info_pkey(int si_co
+ 	 * absolutely guranteed to be 100% accurate because of
+ 	 * the race explained above.
+ 	 */
+-	info->si_pkey = *pkey;
++	info->si_pkey = vma_pkey(vma);
+ }
+ 
+ static void
+ force_sig_info_fault(int si_signo, int si_code, unsigned long address,
+-		     struct task_struct *tsk, u32 *pkey, int fault)
++		     struct task_struct *tsk, struct vm_area_struct *vma,
++		     int fault)
+ {
+ 	unsigned lsb = 0;
+ 	siginfo_t info;
+@@ -237,7 +239,7 @@ force_sig_info_fault(int si_signo, int s
+ 		lsb = PAGE_SHIFT;
+ 	info.si_addr_lsb = lsb;
+ 
+-	fill_sig_info_pkey(si_code, &info, pkey);
++	fill_sig_info_pkey(si_code, &info, vma);
+ 
+ 	force_sig_info(si_signo, &info, tsk);
+ }
+@@ -716,6 +718,8 @@ no_context(struct pt_regs *regs, unsigne
+ 	struct task_struct *tsk = current;
+ 	unsigned long flags;
+ 	int sig;
++	/* No context means no VMA to pass down */
++	struct vm_area_struct *vma = NULL;
+ 
+ 	/* Are we prepared to handle this kernel fault? */
+ 	if (fixup_exception(regs, X86_TRAP_PF)) {
+@@ -740,7 +744,7 @@ no_context(struct pt_regs *regs, unsigne
+ 
+ 			/* XXX: hwpoison faults will set the wrong code. */
+ 			force_sig_info_fault(signal, si_code, address,
+-					     tsk, NULL, 0);
++					     tsk, vma, 0);
+ 		}
+ 
+ 		/*
+@@ -849,7 +853,8 @@ show_signal_msg(struct pt_regs *regs, un
+ 
+ static void
+ __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
+-		       unsigned long address, u32 *pkey, int si_code)
++		       unsigned long address, struct vm_area_struct *vma,
++		       int si_code)
+ {
+ 	struct task_struct *tsk = current;
+ 
+@@ -897,7 +902,7 @@ __bad_area_nosemaphore(struct pt_regs *r
+ 		tsk->thread.error_code	= error_code;
+ 		tsk->thread.trap_nr	= X86_TRAP_PF;
+ 
+-		force_sig_info_fault(SIGSEGV, si_code, address, tsk, pkey, 0);
++		force_sig_info_fault(SIGSEGV, si_code, address, tsk, vma, 0);
+ 
+ 		return;
+ 	}
+@@ -910,9 +915,9 @@ __bad_area_nosemaphore(struct pt_regs *r
+ 
+ static noinline void
+ bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
+-		     unsigned long address, u32 *pkey)
++		     unsigned long address, struct vm_area_struct *vma)
+ {
+-	__bad_area_nosemaphore(regs, error_code, address, pkey, SEGV_MAPERR);
++	__bad_area_nosemaphore(regs, error_code, address, vma, SEGV_MAPERR);
+ }
+ 
+ static void
+@@ -920,10 +925,6 @@ __bad_area(struct pt_regs *regs, unsigne
+ 	   unsigned long address,  struct vm_area_struct *vma, int si_code)
+ {
+ 	struct mm_struct *mm = current->mm;
+-	u32 pkey;
+-
+-	if (vma)
+-		pkey = vma_pkey(vma);
+ 
+ 	/*
+ 	 * Something tried to access memory that isn't in our memory map..
+@@ -931,8 +932,7 @@ __bad_area(struct pt_regs *regs, unsigne
+ 	 */
+ 	up_read(&mm->mmap_sem);
+ 
+-	__bad_area_nosemaphore(regs, error_code, address,
+-			       (vma) ? &pkey : NULL, si_code);
++	__bad_area_nosemaphore(regs, error_code, address, vma, si_code);
+ }
+ 
+ static noinline void
+@@ -975,7 +975,7 @@ bad_area_access_error(struct pt_regs *re
+ 
+ static void
+ do_sigbus(struct pt_regs *regs, unsigned long error_code, unsigned long address,
+-	  u32 *pkey, unsigned int fault)
++	  struct vm_area_struct *vma, unsigned int fault)
+ {
+ 	struct task_struct *tsk = current;
+ 	int code = BUS_ADRERR;
+@@ -1002,12 +1002,13 @@ do_sigbus(struct pt_regs *regs, unsigned
+ 		code = BUS_MCEERR_AR;
+ 	}
+ #endif
+-	force_sig_info_fault(SIGBUS, code, address, tsk, pkey, fault);
++	force_sig_info_fault(SIGBUS, code, address, tsk, vma, fault);
+ }
+ 
+ static noinline void
+ mm_fault_error(struct pt_regs *regs, unsigned long error_code,
+-	       unsigned long address, u32 *pkey, unsigned int fault)
++	       unsigned long address, struct vm_area_struct *vma,
++	       unsigned int fault)
+ {
+ 	if (fatal_signal_pending(current) && !(error_code & PF_USER)) {
+ 		no_context(regs, error_code, address, 0, 0);
+@@ -1031,9 +1032,9 @@ mm_fault_error(struct pt_regs *regs, uns
+ 	} else {
+ 		if (fault & (VM_FAULT_SIGBUS|VM_FAULT_HWPOISON|
+ 			     VM_FAULT_HWPOISON_LARGE))
+-			do_sigbus(regs, error_code, address, pkey, fault);
++			do_sigbus(regs, error_code, address, vma, fault);
+ 		else if (fault & VM_FAULT_SIGSEGV)
+-			bad_area_nosemaphore(regs, error_code, address, pkey);
++			bad_area_nosemaphore(regs, error_code, address, vma);
+ 		else
+ 			BUG();
+ 	}
+@@ -1219,7 +1220,6 @@ __do_page_fault(struct pt_regs *regs, un
+ 	struct mm_struct *mm;
+ 	int fault, major = 0;
+ 	unsigned int flags = FAULT_FLAG_ALLOW_RETRY | FAULT_FLAG_KILLABLE;
+-	u32 pkey;
+ 
+ 	tsk = current;
+ 	mm = tsk->mm;
+@@ -1420,10 +1420,9 @@ good_area:
+ 		return;
+ 	}
+ 
+-	pkey = vma_pkey(vma);
+ 	up_read(&mm->mmap_sem);
+ 	if (unlikely(fault & VM_FAULT_ERROR)) {
+-		mm_fault_error(regs, error_code, address, &pkey, fault);
++		mm_fault_error(regs, error_code, address, vma, fault);
+ 		return;
+ 	}
+ 
+diff -urNp linux/block/bsg-lib.c linux-hao/block/bsg-lib.c
+--- linux/block/bsg-lib.c	2017-10-07 00:57:16.443380221 +0000
++++ linux-hao/block/bsg-lib.c	2017-10-05 04:07:24.577276182 +0000
+@@ -147,6 +147,7 @@ static int bsg_create_job(struct device
+ failjob_rls_rqst_payload:
+ 	kfree(job->request_payload.sg_list);
+ failjob_rls_job:
++	kfree(job);
+ 	return -ENOMEM;
+ }
+ 
+diff -urNp linux/crypto/drbg.c linux-hao/crypto/drbg.c
+--- linux/crypto/drbg.c	2017-10-07 00:57:16.473379940 +0000
++++ linux-hao/crypto/drbg.c	2017-10-05 04:07:24.627275900 +0000
+@@ -1133,10 +1133,10 @@ static inline void drbg_dealloc_state(st
+ {
+ 	if (!drbg)
+ 		return;
+-	kzfree(drbg->Vbuf);
+-	drbg->V = NULL;
+-	kzfree(drbg->Cbuf);
+-	drbg->C = NULL;
++	kzfree(drbg->V);
++	drbg->Vbuf = NULL;
++	kzfree(drbg->C);
++	drbg->Cbuf = NULL;
+ 	kzfree(drbg->scratchpadbuf);
+ 	drbg->scratchpadbuf = NULL;
+ 	drbg->reseed_ctr = 0;
+diff -urNp linux/Documentation/devicetree/bindings/serial/pl011.txt linux-hao/Documentation/devicetree/bindings/serial/pl011.txt
+--- linux/Documentation/devicetree/bindings/serial/pl011.txt	2017-10-07 00:57:01.853514138 +0000
++++ linux-hao/Documentation/devicetree/bindings/serial/pl011.txt	2017-10-05 04:06:43.947505226 +0000
+@@ -35,9 +35,6 @@ Optional properties:
+ - poll-timeout-ms:
+ 	   Poll timeout when auto-poll is set, default
+ 	   3000ms.
+-- cts-event-workaround:
+-	   Enables the (otherwise vendor-specific) workaround for the
+-	   CTS-induced TX lockup.
+ 
+ See also bindings/arm/primecell.txt
+ 
+diff -urNp linux/drivers/base/power/main.c linux-hao/drivers/base/power/main.c
+--- linux/drivers/base/power/main.c	2017-10-07 00:57:16.713377691 +0000
++++ linux-hao/drivers/base/power/main.c	2017-10-05 04:07:24.877274491 +0000
+@@ -1757,13 +1757,10 @@ void device_pm_check_callbacks(struct de
+ {
+ 	spin_lock_irq(&dev->power.lock);
+ 	dev->power.no_pm_callbacks =
+-		(!dev->bus || (pm_ops_is_empty(dev->bus->pm) &&
+-		 !dev->bus->suspend && !dev->bus->resume)) &&
+-		(!dev->class || (pm_ops_is_empty(dev->class->pm) &&
+-		 !dev->class->suspend && !dev->class->resume)) &&
++		(!dev->bus || pm_ops_is_empty(dev->bus->pm)) &&
++		(!dev->class || pm_ops_is_empty(dev->class->pm)) &&
+ 		(!dev->type || pm_ops_is_empty(dev->type->pm)) &&
+ 		(!dev->pm_domain || pm_ops_is_empty(&dev->pm_domain->ops)) &&
+-		(!dev->driver || (pm_ops_is_empty(dev->driver->pm) &&
+-		 !dev->driver->suspend && !dev->driver->resume));
++		(!dev->driver || pm_ops_is_empty(dev->driver->pm));
+ 	spin_unlock_irq(&dev->power.lock);
+ }
+diff -urNp linux/drivers/crypto/talitos.c linux-hao/drivers/crypto/talitos.c
+--- linux/drivers/crypto/talitos.c	2017-10-07 00:57:21.763330007 +0000
++++ linux-hao/drivers/crypto/talitos.c	2017-10-05 04:07:25.967268344 +0000
+@@ -1756,9 +1756,9 @@ static int common_nonsnoop_hash(struct t
+ 		req_ctx->swinit = 0;
+ 	} else {
+ 		desc->ptr[1] = zero_entry;
++		/* Indicate next op is not the first. */
++		req_ctx->first = 0;
+ 	}
+-	/* Indicate next op is not the first. */
+-	req_ctx->first = 0;
+ 
+ 	/* HMAC key */
+ 	if (ctx->keylen)
+@@ -1769,7 +1769,7 @@ static int common_nonsnoop_hash(struct t
+ 
+ 	sg_count = edesc->src_nents ?: 1;
+ 	if (is_sec1 && sg_count > 1)
+-		sg_copy_to_buffer(req_ctx->psrc, sg_count, edesc->buf, length);
++		sg_copy_to_buffer(areq->src, sg_count, edesc->buf, length);
+ 	else
+ 		sg_count = dma_map_sg(dev, req_ctx->psrc, sg_count,
+ 				      DMA_TO_DEVICE);
+@@ -3057,8 +3057,7 @@ static struct talitos_crypto_alg *talito
+ 		t_alg->algt.alg.hash.final = ahash_final;
+ 		t_alg->algt.alg.hash.finup = ahash_finup;
+ 		t_alg->algt.alg.hash.digest = ahash_digest;
+-		if (!strncmp(alg->cra_name, "hmac", 4))
+-			t_alg->algt.alg.hash.setkey = ahash_setkey;
++		t_alg->algt.alg.hash.setkey = ahash_setkey;
+ 		t_alg->algt.alg.hash.import = ahash_import;
+ 		t_alg->algt.alg.hash.export = ahash_export;
+ 
+diff -urNp linux/drivers/gpu/drm/etnaviv/etnaviv_gem.c linux-hao/drivers/gpu/drm/etnaviv/etnaviv_gem.c
+--- linux/drivers/gpu/drm/etnaviv/etnaviv_gem.c	2017-10-07 00:57:45.883093570 +0000
++++ linux-hao/drivers/gpu/drm/etnaviv/etnaviv_gem.c	2017-10-05 04:07:45.477158329 +0000
+@@ -549,15 +549,12 @@ static const struct etnaviv_gem_ops etna
+ void etnaviv_gem_free_object(struct drm_gem_object *obj)
+ {
+ 	struct etnaviv_gem_object *etnaviv_obj = to_etnaviv_bo(obj);
+-	struct etnaviv_drm_private *priv = obj->dev->dev_private;
+ 	struct etnaviv_vram_mapping *mapping, *tmp;
+ 
+ 	/* object should not be active */
+ 	WARN_ON(is_active(etnaviv_obj));
+ 
+-	mutex_lock(&priv->gem_lock);
+ 	list_del(&etnaviv_obj->gem_node);
+-	mutex_unlock(&priv->gem_lock);
+ 
+ 	list_for_each_entry_safe(mapping, tmp, &etnaviv_obj->vram_list,
+ 				 obj_node) {
+diff -urNp linux/drivers/gpu/drm/radeon/radeon_device.c linux-hao/drivers/gpu/drm/radeon/radeon_device.c
+--- linux/drivers/gpu/drm/radeon/radeon_device.c	2017-10-07 00:58:03.592911360 +0000
++++ linux-hao/drivers/gpu/drm/radeon/radeon_device.c	2017-10-05 04:07:45.977155509 +0000
+@@ -1674,7 +1674,7 @@ int radeon_suspend_kms(struct drm_device
+ 	radeon_agp_suspend(rdev);
+ 
+ 	pci_save_state(dev->pdev);
+-	if (freeze && rdev->family >= CHIP_CEDAR && !(rdev->flags & RADEON_IS_IGP)) {
++	if (freeze && rdev->family >= CHIP_CEDAR) {
+ 		rdev->asic->asic_reset(rdev, true);
+ 		pci_restore_state(dev->pdev);
+ 	} else if (suspend) {
+diff -urNp linux/drivers/infiniband/hw/cxgb4/cm.c linux-hao/drivers/infiniband/hw/cxgb4/cm.c
+--- linux/drivers/infiniband/hw/cxgb4/cm.c	2017-10-07 00:58:04.972896875 +0000
++++ linux-hao/drivers/infiniband/hw/cxgb4/cm.c	2017-10-05 04:08:02.817060531 +0000
+@@ -2577,9 +2577,9 @@ fail:
+ 	c4iw_put_ep(&child_ep->com);
+ reject:
+ 	reject_cr(dev, hwtid, skb);
+-out:
+ 	if (parent_ep)
+ 		c4iw_put_ep(&parent_ep->com);
++out:
+ 	return 0;
+ }
+ 
+@@ -3441,7 +3441,7 @@ int c4iw_create_listen(struct iw_cm_id *
+ 		cm_id->provider_data = ep;
+ 		goto out;
+ 	}
+-	remove_handle(ep->com.dev, &ep->com.dev->stid_idr, ep->stid);
++
+ 	cxgb4_free_stid(ep->com.dev->rdev.lldi.tids, ep->stid,
+ 			ep->com.local_addr.ss_family);
+ fail2:
+diff -urNp linux/drivers/md/raid5.c linux-hao/drivers/md/raid5.c
+--- linux/drivers/md/raid5.c	2017-10-07 00:58:07.482870419 +0000
++++ linux-hao/drivers/md/raid5.c	2017-10-05 04:08:03.467056865 +0000
+@@ -829,14 +829,6 @@ static void stripe_add_to_batch_list(str
+ 			spin_unlock(&head->batch_head->batch_lock);
+ 			goto unlock_out;
+ 		}
+-		/*
+-		 * We must assign batch_head of this stripe within the
+-		 * batch_lock, otherwise clear_batch_ready of batch head
+-		 * stripe could clear BATCH_READY bit of this stripe and
+-		 * this stripe->batch_head doesn't get assigned, which
+-		 * could confuse clear_batch_ready for this stripe
+-		 */
+-		sh->batch_head = head->batch_head;
+ 
+ 		/*
+ 		 * at this point, head's BATCH_READY could be cleared, but we
+@@ -844,6 +836,8 @@ static void stripe_add_to_batch_list(str
+ 		 */
+ 		list_add(&sh->batch_list, &head->batch_list);
+ 		spin_unlock(&head->batch_head->batch_lock);
++
++		sh->batch_head = head->batch_head;
+ 	} else {
+ 		head->batch_head = head;
+ 		sh->batch_head = head->batch_head;
+@@ -4283,8 +4277,7 @@ static void break_stripe_batch_list(stru
+ 
+ 		set_mask_bits(&sh->state, ~(STRIPE_EXPAND_SYNC_FLAGS |
+ 					    (1 << STRIPE_PREREAD_ACTIVE) |
+-					    (1 << STRIPE_DEGRADED) |
+-					    (1 << STRIPE_ON_UNPLUG_LIST)),
++					    (1 << STRIPE_DEGRADED)),
+ 			      head_sh->state & (1 << STRIPE_INSYNC));
+ 
+ 		sh->check_state = head_sh->check_state;
+diff -urNp linux/drivers/misc/cxl/api.c linux-hao/drivers/misc/cxl/api.c
+--- linux/drivers/misc/cxl/api.c	2017-10-07 00:58:20.802727836 +0000
++++ linux-hao/drivers/misc/cxl/api.c	2017-10-05 04:08:16.236984842 +0000
+@@ -244,10 +244,6 @@ int cxl_start_context(struct cxl_context
+ 		ctx->real_mode = false;
+ 	}
+ 
+-	/*
+-	 * Increment driver use count. Enables global TLBIs for hash
+-	 * and callbacks to handle the segment table
+-	 */
+ 	cxl_ctx_get();
+ 
+ 	if ((rc = cxl_ops->attach_process(ctx, kernel, wed, 0))) {
+diff -urNp linux/drivers/misc/cxl/file.c linux-hao/drivers/misc/cxl/file.c
+--- linux/drivers/misc/cxl/file.c	2017-10-07 00:58:20.812727727 +0000
++++ linux-hao/drivers/misc/cxl/file.c	2017-10-05 04:08:16.236984842 +0000
+@@ -91,6 +91,7 @@ static int __afu_open(struct inode *inod
+ 
+ 	pr_devel("afu_open pe: %i\n", ctx->pe);
+ 	file->private_data = ctx;
++	cxl_ctx_get();
+ 
+ 	/* indicate success */
+ 	rc = 0;
+@@ -212,12 +213,6 @@ static long afu_ioctl_start_work(struct
+ 	ctx->glpid = get_task_pid(current->group_leader, PIDTYPE_PID);
+ 
+ 
+-	/*
+-	 * Increment driver use count. Enables global TLBIs for hash
+-	 * and callbacks to handle the segment table
+-	 */
+-	cxl_ctx_get();
+-
+ 	trace_cxl_attach(ctx, work.work_element_descriptor, work.num_interrupts, amr);
+ 
+ 	if ((rc = cxl_ops->attach_process(ctx, false, work.work_element_descriptor,
+@@ -227,7 +222,6 @@ static long afu_ioctl_start_work(struct
+ 		put_pid(ctx->glpid);
+ 		put_pid(ctx->pid);
+ 		ctx->glpid = ctx->pid = NULL;
+-		cxl_ctx_put();
+ 		goto out;
+ 	}
+ 
+diff -urNp linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bus.h linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bus.h
+--- linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bus.h	2017-10-07 00:58:41.315097475 +0000
++++ linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/bus.h	2017-10-05 04:08:31.706897587 +0000
+@@ -69,7 +69,6 @@ struct brcmf_bus_dcmd {
+  * @wowl_config: specify if dongle is configured for wowl when going to suspend
+  * @get_ramsize: obtain size of device memory.
+  * @get_memdump: obtain device memory dump in provided buffer.
+- * @get_fwname: obtain firmware name.
+  *
+  * This structure provides an abstract interface towards the
+  * bus specific driver. For control messages to common driver
+@@ -86,8 +85,6 @@ struct brcmf_bus_ops {
+ 	void (*wowl_config)(struct device *dev, bool enabled);
+ 	size_t (*get_ramsize)(struct device *dev);
+ 	int (*get_memdump)(struct device *dev, void *data, size_t len);
+-	int (*get_fwname)(struct device *dev, uint chip, uint chiprev,
+-			  unsigned char *fw_name);
+ };
+ 
+ 
+@@ -211,16 +208,6 @@ int brcmf_bus_get_memdump(struct brcmf_b
+ 	return bus->ops->get_memdump(bus->dev, data, len);
+ }
+ 
+-static inline
+-int brcmf_bus_get_fwname(struct brcmf_bus *bus, uint chip, uint chiprev,
+-			 unsigned char *fw_name)
+-{
+-	if (!bus->ops->get_fwname)
+-		return -EOPNOTSUPP;
+-
+-	return bus->ops->get_fwname(bus->dev, chip, chiprev, fw_name);
+-}
+-
+ /*
+  * interface functions from common layer
+  */
+diff -urNp linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c
+--- linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c	2017-10-07 00:58:41.325100828 +0000
++++ linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/common.c	2017-10-05 04:08:31.716897531 +0000
+@@ -18,7 +18,6 @@
+ #include <linux/string.h>
+ #include <linux/netdevice.h>
+ #include <linux/module.h>
+-#include <linux/firmware.h>
+ #include <brcmu_wifi.h>
+ #include <brcmu_utils.h>
+ #include "core.h"
+@@ -29,7 +28,6 @@
+ #include "tracepoint.h"
+ #include "common.h"
+ #include "of.h"
+-#include "firmware.h"
+ 
+ MODULE_AUTHOR("Broadcom Corporation");
+ MODULE_DESCRIPTION("Broadcom 802.11 wireless LAN fullmac driver.");
+@@ -106,170 +104,15 @@ void brcmf_c_set_joinpref_default(struct
+ 		brcmf_err("Set join_pref error (%d)\n", err);
+ }
+ 
+-int brcmf_c_download_2_dongle(struct brcmf_if *ifp, char *dcmd, u16 flag,
+-			      u16 dload_type, char *dload_buf, u32 len)
+-{
+-	struct brcmf_dload_data_le *dload_ptr;
+-	u32 dload_data_offset;
+-	u16 flags;
+-	s32 err;
+-
+-	dload_ptr = (struct brcmf_dload_data_le *)dload_buf;
+-	dload_data_offset = offsetof(struct brcmf_dload_data_le, data);
+-	flags = flag | (DLOAD_HANDLER_VER << DLOAD_FLAG_VER_SHIFT);
+-
+-	dload_ptr->flag = cpu_to_le16(flags);
+-	dload_ptr->dload_type = cpu_to_le16(dload_type);
+-	dload_ptr->len = cpu_to_le32(len - dload_data_offset);
+-	dload_ptr->crc = cpu_to_le32(0);
+-	len = len + 8 - (len % 8);
+-
+-	err = brcmf_fil_iovar_data_set(ifp, dcmd, (void *)dload_buf, len);
+-
+-	return err;
+-}
+-
+-int brcmf_c_get_clm_name(struct brcmf_if *ifp, u8 *clm_name)
+-{
+-	struct brcmf_rev_info_le revinfo;
+-	struct brcmf_bus *bus = ifp->drvr->bus_if;
+-	u8 fw_name[BRCMF_FW_NAME_LEN];
+-	u8 *ptr;
+-	size_t len;
+-	u32 chipnum;
+-	u32 chiprev;
+-	s32 err;
+-
+-	err = brcmf_fil_cmd_data_get(ifp, BRCMF_C_GET_REVINFO, &revinfo,
+-				     sizeof(revinfo));
+-	if (err < 0) {
+-		brcmf_err("retrieving revision info failed (%d)\n", err);
+-		goto done;
+-	}
+-
+-	chipnum = le32_to_cpu(revinfo.chipnum);
+-	chiprev = le32_to_cpu(revinfo.chiprev);
+-
+-	memset(fw_name, 0, BRCMF_FW_NAME_LEN);
+-	err = brcmf_bus_get_fwname(bus, chipnum, chiprev, fw_name);
+-	if (err) {
+-		brcmf_err("get firmware name failed (%d)\n", err);
+-		goto done;
+-	}
+-
+-	/* generate CLM blob file name */
+-	ptr = strrchr(fw_name, '.');
+-	len = ptr - fw_name + 1;
+-	if (len + strlen(".clm_blob") > BRCMF_FW_NAME_LEN) {
+-		err = -E2BIG;
+-	} else {
+-		strlcpy(clm_name, fw_name, len);
+-		strlcat(clm_name, ".clm_blob", BRCMF_FW_NAME_LEN);
+-	}
+-done:
+-	return err;
+-}
+-
+-int brcmf_c_process_clm_blob(struct brcmf_if *ifp)
+-{
+-	struct device *dev = ifp->drvr->bus_if->dev;
+-	const struct firmware *clm = NULL;
+-	u8 buf[BRCMF_DCMD_SMLEN];
+-	u8 clm_name[BRCMF_FW_NAME_LEN];
+-	u32 data_offset;
+-	u32 size2alloc;
+-	u8 *chunk_buf;
+-	u32 chunk_len;
+-	u32 datalen;
+-	u32 cumulative_len = 0;
+-	u16 dl_flag = DL_BEGIN;
+-	s32 err;
+-
+-	brcmf_dbg(INFO, "Enter\n");
+-
+-	memset(clm_name, 0, BRCMF_FW_NAME_LEN);
+-	err = brcmf_c_get_clm_name(ifp, clm_name);
+-	if (err) {
+-		brcmf_err("get CLM blob file name failed (%d)\n", err);
+-		return err;
+-	}
+-
+-	err = request_firmware_direct(&clm, clm_name, dev);
+-	if (err) {
+-		if (err == -ENOENT)
+-			return 0;
+-		brcmf_err("request CLM blob file failed (%d)\n", err);
+-		return err;
+-	}
+-
+-	datalen = clm->size;
+-	data_offset = offsetof(struct brcmf_dload_data_le, data);
+-	size2alloc = data_offset + MAX_CHUNK_LEN;
+-
+-	chunk_buf = kzalloc(size2alloc, GFP_KERNEL);
+-	if (!chunk_buf) {
+-		err = -ENOMEM;
+-		goto done;
+-	}
+-
+-	do {
+-		if (datalen > MAX_CHUNK_LEN) {
+-			chunk_len = MAX_CHUNK_LEN;
+-		} else {
+-			chunk_len = datalen;
+-			dl_flag |= DL_END;
+-		}
+-
+-		memcpy(chunk_buf + data_offset, clm->data + cumulative_len,
+-		       chunk_len);
+-
+-		err = brcmf_c_download_2_dongle(ifp, "clmload", dl_flag,
+-						DL_TYPE_CLM, chunk_buf,
+-						data_offset + chunk_len);
+-
+-		dl_flag &= ~DL_BEGIN;
+-
+-		cumulative_len += chunk_len;
+-		datalen -= chunk_len;
+-	} while ((datalen > 0) && (err == 0));
+-
+-	if (err) {
+-		brcmf_err("clmload (%d byte file) failed (%d); ",
+-			  (u32)clm->size, err);
+-		/* Retrieve clmload_status and print */
+-		memset(buf, 0, BRCMF_DCMD_SMLEN);
+-		err = brcmf_fil_iovar_data_get(ifp, "clmload_status", buf,
+-					       BRCMF_DCMD_SMLEN);
+-		if (err)
+-			brcmf_err("get clmload_status failed (%d)\n", err);
+-		else
+-			brcmf_err("clmload_status=%d\n", *((int *)buf));
+-		err = -EIO;
+-	}
+-
+-	kfree(chunk_buf);
+-done:
+-	release_firmware(clm);
+-	return err;
+-}
+-
+ int brcmf_c_preinit_dcmds(struct brcmf_if *ifp)
+ {
+ 	s8 eventmask[BRCMF_EVENTING_MASK_LEN];
+ 	u8 buf[BRCMF_DCMD_SMLEN];
+ 	struct brcmf_rev_info_le revinfo;
+ 	struct brcmf_rev_info *ri;
+-	char *clmver;
+ 	char *ptr;
+ 	s32 err;
+ 
+-	/* Do any CLM downloading */
+-	err = brcmf_c_process_clm_blob(ifp);
+-	if (err < 0) {
+-		brcmf_err("download CLM blob file failed, %d\n", err);
+-		goto done;
+-	}
+-
+ 	/* retreive mac address */
+ 	err = brcmf_fil_iovar_data_get(ifp, "cur_etheraddr", ifp->mac_addr,
+ 				       sizeof(ifp->mac_addr));
+@@ -324,24 +167,6 @@ int brcmf_c_preinit_dcmds(struct brcmf_i
+ 	ptr = strrchr(buf, ' ') + 1;
+ 	strlcpy(ifp->drvr->fwver, ptr, sizeof(ifp->drvr->fwver));
+ 
+-	/* Query for 'clmver' to get CLM version info from firmware */
+-	memset(buf, 0, sizeof(buf));
+-	err = brcmf_fil_iovar_data_get(ifp, "clmver", buf, sizeof(buf));
+-	if (err) {
+-		brcmf_err("retrieving clmver failed, %d\n", err);
+-		goto done;
+-	} else {
+-		clmver = (char *)buf;
+-		/* Replace all newline/linefeed characters with space
+-		 * character
+-		 */
+-		ptr = clmver;
+-		while ((ptr = strchr(ptr, '\n')) != NULL)
+-			*ptr = ' ';
+-
+-		brcmf_err("CLM version = %s\n", clmver);
+-	}
+-
+ 	/* set mpc */
+ 	err = brcmf_fil_iovar_int_set(ifp, "mpc", 1);
+ 	if (err) {
+diff -urNp linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h
+--- linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h	2017-10-07 00:58:41.325100828 +0000
++++ linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/fwil_types.h	2017-10-05 04:08:31.726897474 +0000
+@@ -146,22 +146,6 @@
+ #define BRCMF_MFP_CAPABLE		1
+ #define BRCMF_MFP_REQUIRED		2
+ 
+-/* MAX_CHUNK_LEN is the amount of the clm file we send in each ioctl.
+- * It is relatively small because dongles (FW) have a small maximum size
+- * input payload restriction for ioctls.
+- */
+-#define MAX_CHUNK_LEN			1400
+-
+-#define DLOAD_HANDLER_VER		1	/* Downloader version */
+-#define DLOAD_FLAG_VER_MASK		0xf000	/* Downloader version mask */
+-#define DLOAD_FLAG_VER_SHIFT		12	/* Downloader version shift */
+-
+-#define DL_CRC_NOT_INUSE		0x0001
+-#define DL_BEGIN			0x0002
+-#define DL_END				0x0004
+-
+-#define DL_TYPE_CLM			2
+-
+ /* join preference types for join_pref iovar */
+ enum brcmf_join_pref_types {
+ 	BRCMF_JOIN_PREF_RSSI = 1,
+@@ -828,15 +812,4 @@ struct brcmf_gtk_keyinfo_le {
+ 	u8 replay_counter[BRCMF_RSN_REPLAY_LEN];
+ };
+ 
+-/**
+- * struct brcmf_dload_data_le - data passing to firmware for downloading
+- */
+-struct brcmf_dload_data_le {
+-	__le16 flag;
+-	__le16 dload_type;
+-	__le32 len;
+-	__le32 crc;
+-	u8 data[1];
+-};
+-
+ #endif /* FWIL_TYPES_H_ */
+diff -urNp linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c
+--- linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c	2017-10-07 00:58:41.335104182 +0000
++++ linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/pcie.c	2017-10-05 04:08:31.726897474 +0000
+@@ -1317,24 +1317,6 @@ static int brcmf_pcie_get_memdump(struct
+ 	return 0;
+ }
+ 
+-static int brcmf_pcie_get_fwname(struct device *dev, u32 chip, u32 chiprev,
+-				 u8 *fw_name)
+-{
+-	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
+-	struct brcmf_pciedev *buspub = bus_if->bus_priv.pcie;
+-	struct brcmf_pciedev_info *devinfo = buspub->devinfo;
+-	int ret = 0;
+-
+-	if (devinfo->fw_name[0] != '\0')
+-		strlcpy(fw_name, devinfo->fw_name, BRCMF_FW_NAME_LEN);
+-	else
+-		ret = brcmf_fw_map_chip_to_name(chip, chiprev,
+-						brcmf_pcie_fwnames,
+-						ARRAY_SIZE(brcmf_pcie_fwnames),
+-						fw_name, NULL);
+-
+-	return ret;
+-}
+ 
+ static const struct brcmf_bus_ops brcmf_pcie_bus_ops = {
+ 	.txdata = brcmf_pcie_tx,
+@@ -1344,7 +1326,6 @@ static const struct brcmf_bus_ops brcmf_
+ 	.wowl_config = brcmf_pcie_wowl_config,
+ 	.get_ramsize = brcmf_pcie_get_ramsize,
+ 	.get_memdump = brcmf_pcie_get_memdump,
+-	.get_fwname = brcmf_pcie_get_fwname,
+ };
+ 
+ 
+diff -urNp linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c
+--- linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c	2017-10-07 00:58:41.335104182 +0000
++++ linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/sdio.c	2017-10-05 04:08:31.726897474 +0000
+@@ -3965,24 +3965,6 @@ brcmf_sdio_watchdog(unsigned long data)
+ 	}
+ }
+ 
+-static int brcmf_sdio_get_fwname(struct device *dev, u32 chip, u32 chiprev,
+-				 u8 *fw_name)
+-{
+-	struct brcmf_bus *bus_if = dev_get_drvdata(dev);
+-	struct brcmf_sdio_dev *sdiodev = bus_if->bus_priv.sdio;
+-	int ret = 0;
+-
+-	if (sdiodev->fw_name[0] != '\0')
+-		strlcpy(fw_name, sdiodev->fw_name, BRCMF_FW_NAME_LEN);
+-	else
+-		ret = brcmf_fw_map_chip_to_name(chip, chiprev,
+-						brcmf_sdio_fwnames,
+-						ARRAY_SIZE(brcmf_sdio_fwnames),
+-						fw_name, NULL);
+-
+-	return ret;
+-}
+-
+ static const struct brcmf_bus_ops brcmf_sdio_bus_ops = {
+ 	.stop = brcmf_sdio_bus_stop,
+ 	.preinit = brcmf_sdio_bus_preinit,
+@@ -3993,7 +3975,6 @@ static const struct brcmf_bus_ops brcmf_
+ 	.wowl_config = brcmf_sdio_wowl_config,
+ 	.get_ramsize = brcmf_sdio_bus_get_ramsize,
+ 	.get_memdump = brcmf_sdio_bus_get_memdump,
+-	.get_fwname = brcmf_sdio_get_fwname,
+ };
+ 
+ static void brcmf_sdio_firmware_callback(struct device *dev, int err,
+diff -urNp linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/usb.c linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/usb.c
+--- linux/drivers/net/wireless/broadcom/brcm80211/brcmfmac/usb.c	2017-10-07 00:58:41.335104182 +0000
++++ linux-hao/drivers/net/wireless/broadcom/brcm80211/brcmfmac/usb.c	2017-10-05 04:08:31.736897418 +0000
+@@ -1125,30 +1125,12 @@ static void brcmf_usb_wowl_config(struct
+ 		device_set_wakeup_enable(devinfo->dev, false);
+ }
+ 
+-static int brcmf_usb_get_fwname(struct device *dev, u32 chip, u32 chiprev,
+-				u8 *fw_name)
+-{
+-	struct brcmf_usbdev_info *devinfo = brcmf_usb_get_businfo(dev);
+-	int ret = 0;
+-
+-	if (devinfo->fw_name[0] != '\0')
+-		strlcpy(fw_name, devinfo->fw_name, BRCMF_FW_NAME_LEN);
+-	else
+-		ret = brcmf_fw_map_chip_to_name(chip, chiprev,
+-						brcmf_usb_fwnames,
+-						ARRAY_SIZE(brcmf_usb_fwnames),
+-						fw_name, NULL);
+-
+-	return ret;
+-}
+-
+ static const struct brcmf_bus_ops brcmf_usb_bus_ops = {
+ 	.txdata = brcmf_usb_tx,
+ 	.stop = brcmf_usb_down,
+ 	.txctl = brcmf_usb_tx_ctlpkt,
+ 	.rxctl = brcmf_usb_rx_ctlpkt,
+ 	.wowl_config = brcmf_usb_wowl_config,
+-	.get_fwname = brcmf_usb_get_fwname,
+ };
+ 
+ static int brcmf_usb_bus_setup(struct brcmf_usbdev_info *devinfo)
+diff -urNp linux/drivers/net/wireless/mac80211_hwsim.c linux-hao/drivers/net/wireless/mac80211_hwsim.c
+--- linux/drivers/net/wireless/mac80211_hwsim.c	2017-10-07 00:58:45.526499445 +0000
++++ linux-hao/drivers/net/wireless/mac80211_hwsim.c	2017-10-05 04:08:31.926896346 +0000
+@@ -1357,6 +1357,8 @@ static void mac80211_hwsim_tx(struct iee
+ 				       txi->control.rates,
+ 				       ARRAY_SIZE(txi->control.rates));
+ 
++	txi->rate_driver_data[0] = channel;
++
+ 	if (skb->len >= 24 + 8 &&
+ 	    ieee80211_is_probe_resp(hdr->frame_control)) {
+ 		/* fake header transmission time */
+diff -urNp linux/drivers/pci/pci-sysfs.c linux-hao/drivers/pci/pci-sysfs.c
+--- linux/drivers/pci/pci-sysfs.c	2017-10-07 00:58:56.960199722 +0000
++++ linux-hao/drivers/pci/pci-sysfs.c	2017-10-05 04:08:32.466893300 +0000
+@@ -527,7 +527,7 @@ static ssize_t driver_override_store(str
+ 				     const char *buf, size_t count)
+ {
+ 	struct pci_dev *pdev = to_pci_dev(dev);
+-	char *driver_override, *old, *cp;
++	char *driver_override, *old = pdev->driver_override, *cp;
+ 
+ 	/* We need to keep extra room for a newline */
+ 	if (count >= (PAGE_SIZE - 1))
+@@ -541,15 +541,12 @@ static ssize_t driver_override_store(str
+ 	if (cp)
+ 		*cp = '\0';
+ 
+-	device_lock(dev);
+-	old = pdev->driver_override;
+ 	if (strlen(driver_override)) {
+ 		pdev->driver_override = driver_override;
+ 	} else {
+ 		kfree(driver_override);
+ 		pdev->driver_override = NULL;
+ 	}
+-	device_unlock(dev);
+ 
+ 	kfree(old);
+ 
+@@ -560,12 +557,8 @@ static ssize_t driver_override_show(stru
+ 				    struct device_attribute *attr, char *buf)
+ {
+ 	struct pci_dev *pdev = to_pci_dev(dev);
+-	ssize_t len;
+ 
+-	device_lock(dev);
+-	len = snprintf(buf, PAGE_SIZE, "%s\n", pdev->driver_override);
+-	device_unlock(dev);
+-	return len;
++	return snprintf(buf, PAGE_SIZE, "%s\n", pdev->driver_override);
+ }
+ static DEVICE_ATTR_RW(driver_override);
+ 
+diff -urNp linux/drivers/scsi/scsi_transport_iscsi.c linux-hao/drivers/scsi/scsi_transport_iscsi.c
+--- linux/drivers/scsi/scsi_transport_iscsi.c	2017-10-07 00:59:01.871742754 +0000
++++ linux-hao/drivers/scsi/scsi_transport_iscsi.c	2017-10-05 04:08:47.086810826 +0000
+@@ -3696,7 +3696,7 @@ iscsi_if_rx(struct sk_buff *skb)
+ 		uint32_t group;
+ 
+ 		nlh = nlmsg_hdr(skb);
+-		if (nlh->nlmsg_len < sizeof(*nlh) + sizeof(*ev) ||
++		if (nlh->nlmsg_len < sizeof(*nlh) ||
+ 		    skb->len < nlh->nlmsg_len) {
+ 			break;
+ 		}
+diff -urNp linux/drivers/tty/serial/amba-pl011.c linux-hao/drivers/tty/serial/amba-pl011.c
+--- linux/drivers/tty/serial/amba-pl011.c	2017-10-07 00:59:14.285523076 +0000
++++ linux-hao/drivers/tty/serial/amba-pl011.c	2017-10-05 04:08:59.036743414 +0000
+@@ -1384,7 +1384,6 @@ static bool pl011_tx_char(struct uart_am
+ 		return false; /* unable to transmit character */
+ 
+ 	pl011_write(c, uap, REG_DR);
+-	mb();
+ 	uap->port.icount.tx++;
+ 
+ 	return true;
+@@ -2524,11 +2523,6 @@ static int pl011_probe(struct amba_devic
+ 	if (IS_ERR(uap->clk))
+ 		return PTR_ERR(uap->clk);
+ 
+-	if (of_property_read_bool(dev->dev.of_node, "cts-event-workaround")) {
+-	    vendor->cts_event_workaround = true;
+-	    dev_info(&dev->dev, "cts_event_workaround enabled\n");
+-	}
+-
+ 	uap->reg_offset = vendor->reg_offset;
+ 	uap->vendor = vendor;
+ 	uap->fifosize = vendor->get_fifosize(dev);
+diff -urNp linux/drivers/video/fbdev/aty/atyfb_base.c linux-hao/drivers/video/fbdev/aty/atyfb_base.c
+--- linux/drivers/video/fbdev/aty/atyfb_base.c	2017-10-07 00:59:14.805677839 +0000
++++ linux-hao/drivers/video/fbdev/aty/atyfb_base.c	2017-10-05 04:08:59.556740481 +0000
+@@ -1861,7 +1861,7 @@ static int atyfb_ioctl(struct fb_info *i
+ #if defined(DEBUG) && defined(CONFIG_FB_ATY_CT)
+ 	case ATYIO_CLKR:
+ 		if (M64_HAS(INTEGRATED)) {
+-			struct atyclk clk = { 0 };
++			struct atyclk clk;
+ 			union aty_pll *pll = &par->pll;
+ 			u32 dsp_config = pll->ct.dsp_config;
+ 			u32 dsp_on_off = pll->ct.dsp_on_off;
+diff -urNp linux/drivers/xen/swiotlb-xen.c linux-hao/drivers/xen/swiotlb-xen.c
+--- linux/drivers/xen/swiotlb-xen.c	2017-10-07 00:59:21.037509514 +0000
++++ linux-hao/drivers/xen/swiotlb-xen.c	2017-10-05 04:08:59.876738675 +0000
+@@ -680,22 +680,3 @@ xen_swiotlb_set_dma_mask(struct device *
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(xen_swiotlb_set_dma_mask);
+-
+-/*
+- * Create userspace mapping for the DMA-coherent memory.
+- * This function should be called with the pages from the current domain only,
+- * passing pages mapped from other domains would lead to memory corruption.
+- */
+-int
+-xen_swiotlb_dma_mmap(struct device *dev, struct vm_area_struct *vma,
+-		     void *cpu_addr, dma_addr_t dma_addr, size_t size,
+-		     unsigned long attrs)
+-{
+-#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
+-	if (__generic_dma_ops(dev)->mmap)
+-		return __generic_dma_ops(dev)->mmap(dev, vma, cpu_addr,
+-						    dma_addr, size, attrs);
+-#endif
+-	return dma_common_mmap(dev, vma, cpu_addr, dma_addr, size);
+-}
+-EXPORT_SYMBOL_GPL(xen_swiotlb_dma_mmap);
+diff -urNp linux/fs/btrfs/ioctl.c linux-hao/fs/btrfs/ioctl.c
+--- linux/fs/btrfs/ioctl.c	2017-10-07 00:59:21.317590777 +0000
++++ linux-hao/fs/btrfs/ioctl.c	2017-10-05 04:09:00.126737265 +0000
+@@ -3052,7 +3052,7 @@ static int btrfs_cmp_data_prepare(struct
+ out:
+ 	if (ret)
+ 		btrfs_cmp_data_free(cmp);
+-	return ret;
++	return 0;
+ }
+ 
+ static int btrfs_cmp_data(struct inode *src, u64 loff, struct inode *dst,
+@@ -4082,10 +4082,6 @@ static long btrfs_ioctl_default_subvol(s
+ 		ret = PTR_ERR(new_root);
+ 		goto out;
+ 	}
+-	if (!is_fstree(new_root->objectid)) {
+-		ret = -ENOENT;
+-		goto out;
+-	}
+ 
+ 	path = btrfs_alloc_path();
+ 	if (!path) {
+diff -urNp linux/fs/btrfs/relocation.c linux-hao/fs/btrfs/relocation.c
+--- linux/fs/btrfs/relocation.c	2017-10-07 00:59:21.327593679 +0000
++++ linux-hao/fs/btrfs/relocation.c	2017-10-05 04:09:00.136737209 +0000
+@@ -2367,11 +2367,11 @@ void free_reloc_roots(struct list_head *
+ 	while (!list_empty(list)) {
+ 		reloc_root = list_entry(list->next, struct btrfs_root,
+ 					root_list);
+-		__del_reloc_root(reloc_root);
+ 		free_extent_buffer(reloc_root->node);
+ 		free_extent_buffer(reloc_root->commit_root);
+ 		reloc_root->node = NULL;
+ 		reloc_root->commit_root = NULL;
++		__del_reloc_root(reloc_root);
+ 	}
+ }
+ 
+diff -urNp linux/fs/cifs/cifsfs.c linux-hao/fs/cifs/cifsfs.c
+--- linux/fs/cifs/cifsfs.c	2017-10-07 00:59:21.367605288 +0000
++++ linux-hao/fs/cifs/cifsfs.c	2017-10-05 04:09:00.186736927 +0000
+@@ -1360,7 +1360,7 @@ exit_cifs(void)
+ 	exit_cifs_idmap();
+ #endif
+ #ifdef CONFIG_CIFS_UPCALL
+-	exit_cifs_spnego();
++	unregister_key_type(&cifs_spnego_key_type);
+ #endif
+ 	cifs_destroy_request_bufs();
+ 	cifs_destroy_mids();
+diff -urNp linux/fs/cifs/connect.c linux-hao/fs/cifs/connect.c
+--- linux/fs/cifs/connect.c	2017-10-07 00:59:21.377608191 +0000
++++ linux-hao/fs/cifs/connect.c	2017-10-05 04:09:00.196736870 +0000
+@@ -4071,14 +4071,6 @@ cifs_setup_session(const unsigned int xi
+ 	cifs_dbg(FYI, "Security Mode: 0x%x Capabilities: 0x%x TimeAdjust: %d\n",
+ 		 server->sec_mode, server->capabilities, server->timeAdj);
+ 
+-	if (ses->auth_key.response) {
+-		cifs_dbg(VFS, "Free previous auth_key.response = %p\n",
+-			 ses->auth_key.response);
+-		kfree(ses->auth_key.response);
+-		ses->auth_key.response = NULL;
+-		ses->auth_key.len = 0;
+-	}
+-
+ 	if (server->ops->sess_setup)
+ 		rc = server->ops->sess_setup(xid, ses, nls_info);
+ 
+diff -urNp linux/fs/cifs/file.c linux-hao/fs/cifs/file.c
+--- linux/fs/cifs/file.c	2017-10-07 00:59:21.387611093 +0000
++++ linux-hao/fs/cifs/file.c	2017-10-05 04:09:00.196736870 +0000
+@@ -224,13 +224,6 @@ cifs_nt_open(char *full_path, struct ino
+ 	if (backup_cred(cifs_sb))
+ 		create_options |= CREATE_OPEN_BACKUP_INTENT;
+ 
+-	/* O_SYNC also has bit for O_DSYNC so following check picks up either */
+-	if (f_flags & O_SYNC)
+-		create_options |= CREATE_WRITE_THROUGH;
+-
+-	if (f_flags & O_DIRECT)
+-		create_options |= CREATE_NO_BUFFER;
+-
+ 	oparms.tcon = tcon;
+ 	oparms.cifs_sb = cifs_sb;
+ 	oparms.desired_access = desired_access;
+diff -urNp linux/fs/cifs/smb2pdu.c linux-hao/fs/cifs/smb2pdu.c
+--- linux/fs/cifs/smb2pdu.c	2017-10-07 00:59:21.397613995 +0000
++++ linux-hao/fs/cifs/smb2pdu.c	2017-10-05 04:09:00.206736814 +0000
+@@ -366,7 +366,7 @@ assemble_neg_contexts(struct smb2_negoti
+ 	build_encrypt_ctxt((struct smb2_encryption_neg_context *)pneg_ctxt);
+ 	req->NegotiateContextOffset = cpu_to_le32(OFFSET_OF_NEG_CONTEXT);
+ 	req->NegotiateContextCount = cpu_to_le16(2);
+-	inc_rfc1001_len(req, 4 + sizeof(struct smb2_preauth_neg_context)
++	inc_rfc1001_len(req, 4 + sizeof(struct smb2_preauth_neg_context) + 2
+ 			+ sizeof(struct smb2_encryption_neg_context)); /* calculate hash */
+ }
+ #else
+@@ -531,22 +531,15 @@ int smb3_validate_negotiate(const unsign
+ 
+ 	/*
+ 	 * validation ioctl must be signed, so no point sending this if we
+-	 * can not sign it (ie are not known user).  Even if signing is not
+-	 * required (enabled but not negotiated), in those cases we selectively
++	 * can not sign it.  We could eventually change this to selectively
+ 	 * sign just this, the first and only signed request on a connection.
+-	 * Having validation of negotiate info  helps reduce attack vectors.
++	 * This is good enough for now since a user who wants better security
++	 * would also enable signing on the mount. Having validation of
++	 * negotiate info for signed connections helps reduce attack vectors
+ 	 */
+-	if (tcon->ses->session_flags & SMB2_SESSION_FLAG_IS_GUEST)
++	if (tcon->ses->server->sign == false)
+ 		return 0; /* validation requires signing */
+ 
+-	if (tcon->ses->user_name == NULL) {
+-		cifs_dbg(FYI, "Can't validate negotiate: null user mount\n");
+-		return 0; /* validation requires signing */
+-	}
+-
+-	if (tcon->ses->session_flags & SMB2_SESSION_FLAG_IS_NULL)
+-		cifs_dbg(VFS, "Unexpected null user (anonymous) auth flag sent by server\n");
+-
+ 	vneg_inbuf.Capabilities =
+ 			cpu_to_le32(tcon->ses->server->vals->req_capabilities);
+ 	memcpy(vneg_inbuf.Guid, tcon->ses->server->client_guid,
+@@ -1017,8 +1010,6 @@ SMB2_sess_setup(const unsigned int xid,
+ 	while (sess_data->func)
+ 		sess_data->func(sess_data);
+ 
+-	if ((ses->session_flags & SMB2_SESSION_FLAG_IS_GUEST) && (ses->sign))
+-		cifs_dbg(VFS, "signing requested but authenticated as guest\n");
+ 	rc = sess_data->result;
+ out:
+ 	kfree(sess_data);
+diff -urNp linux/fs/gfs2/glock.c linux-hao/fs/gfs2/glock.c
+--- linux/fs/gfs2/glock.c	2017-10-07 00:59:23.228143615 +0000
++++ linux-hao/fs/gfs2/glock.c	2017-10-05 04:09:00.346736024 +0000
+@@ -1836,9 +1836,13 @@ static void *gfs2_glock_seq_start(struct
+ {
+ 	struct gfs2_glock_iter *gi = seq->private;
+ 	loff_t n = *pos;
++	int ret;
+ 
+-	rhashtable_walk_enter(&gl_hash_table, &gi->hti);
+-	if (rhashtable_walk_start(&gi->hti) != 0)
++	if (gi->last_pos <= *pos)
++		n = (*pos - gi->last_pos);
++
++	ret = rhashtable_walk_start(&gi->hti);
++	if (ret)
+ 		return NULL;
+ 
+ 	do {
+@@ -1846,7 +1850,6 @@ static void *gfs2_glock_seq_start(struct
+ 	} while (gi->gl && n--);
+ 
+ 	gi->last_pos = *pos;
+-
+ 	return gi->gl;
+ }
+ 
+@@ -1858,7 +1861,6 @@ static void *gfs2_glock_seq_next(struct
+ 	(*pos)++;
+ 	gi->last_pos = *pos;
+ 	gfs2_glock_iter_next(gi);
+-
+ 	return gi->gl;
+ }
+ 
+@@ -1868,7 +1870,6 @@ static void gfs2_glock_seq_stop(struct s
+ 
+ 	gi->gl = NULL;
+ 	rhashtable_walk_stop(&gi->hti);
+-	rhashtable_walk_exit(&gi->hti);
+ }
+ 
+ static int gfs2_glock_seq_show(struct seq_file *seq, void *iter_ptr)
+@@ -1931,10 +1932,12 @@ static int gfs2_glocks_open(struct inode
+ 		struct gfs2_glock_iter *gi = seq->private;
+ 
+ 		gi->sdp = inode->i_private;
++		gi->last_pos = 0;
+ 		seq->buf = kmalloc(GFS2_SEQ_GOODSIZE, GFP_KERNEL | __GFP_NOWARN);
+ 		if (seq->buf)
+ 			seq->size = GFS2_SEQ_GOODSIZE;
+ 		gi->gl = NULL;
++		ret = rhashtable_walk_init(&gl_hash_table, &gi->hti, GFP_KERNEL);
+ 	}
+ 	return ret;
+ }
+@@ -1945,6 +1948,7 @@ static int gfs2_glocks_release(struct in
+ 	struct gfs2_glock_iter *gi = seq->private;
+ 
+ 	gi->gl = NULL;
++	rhashtable_walk_exit(&gi->hti);
+ 	return seq_release_private(inode, file);
+ }
+ 
+@@ -1956,10 +1960,12 @@ static int gfs2_glstats_open(struct inod
+ 		struct seq_file *seq = file->private_data;
+ 		struct gfs2_glock_iter *gi = seq->private;
+ 		gi->sdp = inode->i_private;
++		gi->last_pos = 0;
+ 		seq->buf = kmalloc(GFS2_SEQ_GOODSIZE, GFP_KERNEL | __GFP_NOWARN);
+ 		if (seq->buf)
+ 			seq->size = GFS2_SEQ_GOODSIZE;
+ 		gi->gl = NULL;
++		ret = rhashtable_walk_init(&gl_hash_table, &gi->hti, GFP_KERNEL);
+ 	}
+ 	return ret;
+ }
+diff -urNp linux/fs/proc/array.c linux-hao/fs/proc/array.c
+--- linux/fs/proc/array.c	2017-10-07 00:59:27.819456735 +0000
++++ linux-hao/fs/proc/array.c	2017-10-05 04:09:11.266674422 +0000
+@@ -60,7 +60,6 @@
+ #include <linux/tty.h>
+ #include <linux/string.h>
+ #include <linux/mman.h>
+-#include <linux/sched.h>
+ #include <linux/proc_fs.h>
+ #include <linux/ioport.h>
+ #include <linux/uaccess.h>
+@@ -417,15 +416,7 @@ static int do_task_stat(struct seq_file
+ 		 * esp and eip are intentionally zeroed out.  There is no
+ 		 * non-racy way to read them without freezing the task.
+ 		 * Programs that need reliable values can use ptrace(2).
+-		 *
+-		 * The only exception is if the task is core dumping because
+-		 * a program is not able to use ptrace(2) in that case. It is
+-		 * safe because the task has stopped executing permanently.
+ 		 */
+-		if (permitted && (task->flags & PF_DUMPCORE)) {
+-			eip = KSTK_EIP(task);
+-			esp = KSTK_ESP(task);
+-		}
+ 	}
+ 
+ 	get_task_comm(tcomm, task);
+diff -urNp linux/fs/read_write.c linux-hao/fs/read_write.c
+--- linux/fs/read_write.c	2017-10-07 00:59:27.839462416 +0000
++++ linux-hao/fs/read_write.c	2017-10-05 04:09:11.286674310 +0000
+@@ -114,7 +114,7 @@ generic_file_llseek_size(struct file *fi
+ 		 * In the generic case the entire file is data, so as long as
+ 		 * offset isn't at the end of the file then the offset is data.
+ 		 */
+-		if ((unsigned long long)offset >= eof)
++		if (offset >= eof)
+ 			return -ENXIO;
+ 		break;
+ 	case SEEK_HOLE:
+@@ -122,7 +122,7 @@ generic_file_llseek_size(struct file *fi
+ 		 * There is a virtual hole at the end of the file, so as long as
+ 		 * offset isn't i_size or larger, return i_size.
+ 		 */
+-		if ((unsigned long long)offset >= eof)
++		if (offset >= eof)
+ 			return -ENXIO;
+ 		offset = eof;
+ 		break;
+diff -urNp linux/fs/xfs/xfs_ioctl.c linux-hao/fs/xfs/xfs_ioctl.c
+--- linux/fs/xfs/xfs_ioctl.c	2017-10-07 00:59:27.969499342 +0000
++++ linux-hao/fs/xfs/xfs_ioctl.c	2017-10-05 04:09:11.426673520 +0000
+@@ -1085,7 +1085,6 @@ xfs_ioctl_setattr_dax_invalidate(
+ 	int			*join_flags)
+ {
+ 	struct inode		*inode = VFS_I(ip);
+-	struct super_block	*sb = inode->i_sb;
+ 	int			error;
+ 
+ 	*join_flags = 0;
+@@ -1098,7 +1097,7 @@ xfs_ioctl_setattr_dax_invalidate(
+ 	if (fa->fsx_xflags & FS_XFLAG_DAX) {
+ 		if (!(S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode)))
+ 			return -EINVAL;
+-		if (bdev_dax_supported(sb, sb->s_blocksize) < 0)
++		if (ip->i_mount->m_sb.sb_blocksize != PAGE_SIZE)
+ 			return -EINVAL;
+ 	}
+ 
+Binary files linux/.git/index and linux-hao/.git/index differ
+diff -urNp linux/.git/logs/HEAD linux-hao/.git/logs/HEAD
+--- linux/.git/logs/HEAD	2017-10-07 00:57:00.873522928 +0000
++++ linux-hao/.git/logs/HEAD	2017-10-05 04:06:42.907511087 +0000
+@@ -1 +1 @@
+-0000000000000000000000000000000000000000 e9091cf619830738bbab5d71ab0431af6b20d07f pi <pi@raspberrypi.(none)> 1507337820 +0000	clone: from https://github.com/raspberrypi/linux
++0000000000000000000000000000000000000000 cb0f9729052e882a85816c795beec2f6e982eea2 pi <pi@raspberrypi.(none)> 1507176402 +0000	clone: from https://github.com/raspberrypi/linux
+diff -urNp linux/.git/logs/refs/heads/rpi-4.9.y linux-hao/.git/logs/refs/heads/rpi-4.9.y
+--- linux/.git/logs/refs/heads/rpi-4.9.y	2017-10-07 00:57:00.873522928 +0000
++++ linux-hao/.git/logs/refs/heads/rpi-4.9.y	2017-10-05 04:06:42.907511087 +0000
+@@ -1 +1 @@
+-0000000000000000000000000000000000000000 e9091cf619830738bbab5d71ab0431af6b20d07f pi <pi@raspberrypi.(none)> 1507337820 +0000	clone: from https://github.com/raspberrypi/linux
++0000000000000000000000000000000000000000 cb0f9729052e882a85816c795beec2f6e982eea2 pi <pi@raspberrypi.(none)> 1507176402 +0000	clone: from https://github.com/raspberrypi/linux
+diff -urNp linux/.git/logs/refs/remotes/origin/HEAD linux-hao/.git/logs/refs/remotes/origin/HEAD
+--- linux/.git/logs/refs/remotes/origin/HEAD	2017-10-07 00:57:00.873522928 +0000
++++ linux-hao/.git/logs/refs/remotes/origin/HEAD	2017-10-05 04:06:42.907511087 +0000
+@@ -1 +1 @@
+-0000000000000000000000000000000000000000 e9091cf619830738bbab5d71ab0431af6b20d07f pi <pi@raspberrypi.(none)> 1507337820 +0000	clone: from https://github.com/raspberrypi/linux
++0000000000000000000000000000000000000000 cb0f9729052e882a85816c795beec2f6e982eea2 pi <pi@raspberrypi.(none)> 1507176402 +0000	clone: from https://github.com/raspberrypi/linux
+Binary files linux/.git/objects/pack/pack-25ba608808cd74c539a23a1376190365ed471099.idx and linux-hao/.git/objects/pack/pack-25ba608808cd74c539a23a1376190365ed471099.idx differ
+Binary files linux/.git/objects/pack/pack-25ba608808cd74c539a23a1376190365ed471099.pack and linux-hao/.git/objects/pack/pack-25ba608808cd74c539a23a1376190365ed471099.pack differ
+Binary files linux/.git/objects/pack/pack-a78bef0811b9d6263be921ea66ced9de2ebdabad.idx and linux-hao/.git/objects/pack/pack-a78bef0811b9d6263be921ea66ced9de2ebdabad.idx differ
+Binary files linux/.git/objects/pack/pack-a78bef0811b9d6263be921ea66ced9de2ebdabad.pack and linux-hao/.git/objects/pack/pack-a78bef0811b9d6263be921ea66ced9de2ebdabad.pack differ
+diff -urNp linux/.git/packed-refs linux-hao/.git/packed-refs
+--- linux/.git/packed-refs	2017-10-07 00:57:00.863523018 +0000
++++ linux-hao/.git/packed-refs	2017-10-05 04:06:42.907511087 +0000
+@@ -1,2 +1,2 @@
+ # pack-refs with: peeled fully-peeled 
+-e9091cf619830738bbab5d71ab0431af6b20d07f refs/remotes/origin/rpi-4.9.y
++cb0f9729052e882a85816c795beec2f6e982eea2 refs/remotes/origin/rpi-4.9.y
+diff -urNp linux/.git/refs/heads/rpi-4.9.y linux-hao/.git/refs/heads/rpi-4.9.y
+--- linux/.git/refs/heads/rpi-4.9.y	2017-10-07 00:57:00.873522928 +0000
++++ linux-hao/.git/refs/heads/rpi-4.9.y	2017-10-05 04:06:42.907511087 +0000
+@@ -1 +1 @@
+-e9091cf619830738bbab5d71ab0431af6b20d07f
++cb0f9729052e882a85816c795beec2f6e982eea2
+diff -urNp linux/.git/shallow linux-hao/.git/shallow
+--- linux/.git/shallow	2017-10-07 00:54:36.194468384 +0000
++++ linux-hao/.git/shallow	2017-10-05 04:04:31.588249268 +0000
+@@ -1 +1 @@
+-e9091cf619830738bbab5d71ab0431af6b20d07f
++cb0f9729052e882a85816c795beec2f6e982eea2
+diff -urNp linux/include/linux/key.h linux-hao/include/linux/key.h
+--- linux/include/linux/key.h	2017-10-07 00:59:28.259581471 +0000
++++ linux-hao/include/linux/key.h	2017-10-05 04:09:11.736671771 +0000
+@@ -176,7 +176,6 @@ struct key {
+ #define KEY_FLAG_BUILTIN	8	/* set if key is built in to the kernel */
+ #define KEY_FLAG_ROOT_CAN_INVAL	9	/* set if key can be invalidated by root without permission */
+ #define KEY_FLAG_KEEP		10	/* set if key should not be removed */
+-#define KEY_FLAG_UID_KEYRING	11	/* set if key is a user or user session keyring */
+ 
+ 	/* the key type and key description string
+ 	 * - the desc is used to match a key against search criteria
+@@ -236,7 +235,6 @@ extern struct key *key_alloc(struct key_
+ #define KEY_ALLOC_NOT_IN_QUOTA		0x0002	/* not in quota */
+ #define KEY_ALLOC_BUILT_IN		0x0004	/* Key is built into kernel */
+ #define KEY_ALLOC_BYPASS_RESTRICTION	0x0008	/* Override the check on restricted keyrings */
+-#define KEY_ALLOC_UID_KEYRING		0x0010	/* allocating a user or user session keyring */
+ 
+ extern void key_revoke(struct key *key);
+ extern void key_invalidate(struct key *key);
+diff -urNp linux/include/linux/syscalls.h linux-hao/include/linux/syscalls.h
+--- linux/include/linux/syscalls.h	2017-10-07 00:59:31.120387582 +0000
++++ linux-hao/include/linux/syscalls.h	2017-10-06 05:10:47.246239972 +0000
+@@ -902,5 +902,5 @@ asmlinkage long sys_pkey_mprotect(unsign
+ 				  unsigned long prot, int pkey);
+ asmlinkage long sys_pkey_alloc(unsigned long flags, unsigned long init_val);
+ asmlinkage long sys_pkey_free(int pkey);
+-
++asmlinkage long sys_haole(void);
+ #endif
+diff -urNp linux/include/net/mac80211.h linux-hao/include/net/mac80211.h
+--- linux/include/net/mac80211.h	2017-10-07 00:59:33.361013108 +0000
++++ linux-hao/include/net/mac80211.h	2017-10-05 04:09:12.136669515 +0000
+@@ -902,10 +902,21 @@ struct ieee80211_tx_info {
+ 				unsigned long jiffies;
+ 			};
+ 			/* NB: vif can be NULL for injected frames */
+-			struct ieee80211_vif *vif;
++			union {
++				/* NB: vif can be NULL for injected frames */
++				struct ieee80211_vif *vif;
++
++				/* When packets are enqueued on txq it's easy
++				 * to re-construct the vif pointer. There's no
++				 * more space in tx_info so it can be used to
++				 * store the necessary enqueue time for packet
++				 * sojourn time computation.
++				 */
++				codel_time_t enqueue_time;
++			};
+ 			struct ieee80211_key_conf *hw_key;
+ 			u32 flags;
+-			codel_time_t enqueue_time;
++			/* 4 bytes free */
+ 		} control;
+ 		struct {
+ 			u64 cookie;
+diff -urNp linux/include/xen/swiotlb-xen.h linux-hao/include/xen/swiotlb-xen.h
+--- linux/include/xen/swiotlb-xen.h	2017-10-07 00:59:40.512976748 +0000
++++ linux-hao/include/xen/swiotlb-xen.h	2017-10-05 04:09:12.456667709 +0000
+@@ -58,9 +58,4 @@ xen_swiotlb_dma_supported(struct device
+ 
+ extern int
+ xen_swiotlb_set_dma_mask(struct device *dev, u64 dma_mask);
+-
+-extern int
+-xen_swiotlb_dma_mmap(struct device *dev, struct vm_area_struct *vma,
+-		     void *cpu_addr, dma_addr_t dma_addr, size_t size,
+-		     unsigned long attrs);
+ #endif /* __LINUX_SWIOTLB_XEN_H */
+diff -urNp linux/kernel/irq/irqdesc.c linux-hao/kernel/irq/irqdesc.c
+--- linux/kernel/irq/irqdesc.c	2017-10-07 00:59:40.572993017 +0000
++++ linux-hao/kernel/irq/irqdesc.c	2017-10-05 04:09:12.516667371 +0000
+@@ -405,8 +405,10 @@ static void free_desc(unsigned int irq)
+ 	 * The sysfs entry must be serialized against a concurrent
+ 	 * irq_sysfs_init() as well.
+ 	 */
++	mutex_lock(&sparse_irq_lock);
+ 	kobject_del(&desc->kobj);
+ 	delete_irq_desc(irq);
++	mutex_unlock(&sparse_irq_lock);
+ 
+ 	/*
+ 	 * We free the descriptor, masks and stat fields via RCU. That
+@@ -444,15 +446,20 @@ static int alloc_descs(unsigned int star
+ 		desc = alloc_desc(start + i, node, flags, mask, owner);
+ 		if (!desc)
+ 			goto err;
++		mutex_lock(&sparse_irq_lock);
+ 		irq_insert_desc(start + i, desc);
+ 		irq_sysfs_add(start + i, desc);
++		mutex_unlock(&sparse_irq_lock);
+ 	}
+-	bitmap_set(allocated_irqs, start, cnt);
+ 	return start;
+ 
+ err:
+ 	for (i--; i >= 0; i--)
+ 		free_desc(start + i);
++
++	mutex_lock(&sparse_irq_lock);
++	bitmap_clear(allocated_irqs, start, cnt);
++	mutex_unlock(&sparse_irq_lock);
+ 	return -ENOMEM;
+ }
+ 
+@@ -551,7 +558,6 @@ static inline int alloc_descs(unsigned i
+ 
+ 		desc->owner = owner;
+ 	}
+-	bitmap_set(allocated_irqs, start, cnt);
+ 	return start;
+ }
+ 
+@@ -647,10 +653,10 @@ void irq_free_descs(unsigned int from, u
+ 	if (from >= nr_irqs || (from + cnt) > nr_irqs)
+ 		return;
+ 
+-	mutex_lock(&sparse_irq_lock);
+ 	for (i = 0; i < cnt; i++)
+ 		free_desc(from + i);
+ 
++	mutex_lock(&sparse_irq_lock);
+ 	bitmap_clear(allocated_irqs, from, cnt);
+ 	mutex_unlock(&sparse_irq_lock);
+ }
+@@ -697,15 +703,19 @@ __irq_alloc_descs(int irq, unsigned int
+ 					   from, cnt, 0);
+ 	ret = -EEXIST;
+ 	if (irq >=0 && start != irq)
+-		goto unlock;
++		goto err;
+ 
+ 	if (start + cnt > nr_irqs) {
+ 		ret = irq_expand_nr_irqs(start + cnt);
+ 		if (ret)
+-			goto unlock;
++			goto err;
+ 	}
+-	ret = alloc_descs(start, cnt, node, affinity, owner);
+-unlock:
++
++	bitmap_set(allocated_irqs, start, cnt);
++	mutex_unlock(&sparse_irq_lock);
++	return alloc_descs(start, cnt, node, affinity, owner);
++
++err:
+ 	mutex_unlock(&sparse_irq_lock);
+ 	return ret;
+ }
+diff -urNp linux/kernel/seccomp.c linux-hao/kernel/seccomp.c
+--- linux/kernel/seccomp.c	2017-10-07 00:59:40.653014709 +0000
++++ linux-hao/kernel/seccomp.c	2017-10-05 04:09:12.586666976 +0000
+@@ -457,19 +457,14 @@ static long seccomp_attach_filter(unsign
+ 	return 0;
+ }
+ 
+-void __get_seccomp_filter(struct seccomp_filter *filter)
+-{
+-	/* Reference count is bounded by the number of total processes. */
+-	atomic_inc(&filter->usage);
+-}
+-
+ /* get_seccomp_filter - increments the reference count of the filter on @tsk */
+ void get_seccomp_filter(struct task_struct *tsk)
+ {
+ 	struct seccomp_filter *orig = tsk->seccomp.filter;
+ 	if (!orig)
+ 		return;
+-	__get_seccomp_filter(orig);
++	/* Reference count is bounded by the number of total processes. */
++	atomic_inc(&orig->usage);
+ }
+ 
+ static inline void seccomp_filter_free(struct seccomp_filter *filter)
+@@ -480,8 +475,10 @@ static inline void seccomp_filter_free(s
+ 	}
+ }
+ 
+-static void __put_seccomp_filter(struct seccomp_filter *orig)
++/* put_seccomp_filter - decrements the ref count of tsk->seccomp.filter */
++void put_seccomp_filter(struct task_struct *tsk)
+ {
++	struct seccomp_filter *orig = tsk->seccomp.filter;
+ 	/* Clean up single-reference branches iteratively. */
+ 	while (orig && atomic_dec_and_test(&orig->usage)) {
+ 		struct seccomp_filter *freeme = orig;
+@@ -490,12 +487,6 @@ static void __put_seccomp_filter(struct
+ 	}
+ }
+ 
+-/* put_seccomp_filter - decrements the ref count of tsk->seccomp.filter */
+-void put_seccomp_filter(struct task_struct *tsk)
+-{
+-	__put_seccomp_filter(tsk->seccomp.filter);
+-}
+-
+ /**
+  * seccomp_send_sigsys - signals the task to allow in-process syscall emulation
+  * @syscall: syscall number to send to userland
+@@ -901,13 +892,13 @@ long seccomp_get_filter(struct task_stru
+ 	if (!data)
+ 		goto out;
+ 
+-	__get_seccomp_filter(filter);
++	get_seccomp_filter(task);
+ 	spin_unlock_irq(&task->sighand->siglock);
+ 
+ 	if (copy_to_user(data, fprog->filter, bpf_classic_proglen(fprog)))
+ 		ret = -EFAULT;
+ 
+-	__put_seccomp_filter(filter);
++	put_seccomp_filter(task);
+ 	return ret;
+ 
+ out:
+diff -urNp linux/kernel/sysctl.c linux-hao/kernel/sysctl.c
+--- linux/kernel/sysctl.c	2017-10-07 00:59:40.663017421 +0000
++++ linux-hao/kernel/sysctl.c	2017-10-05 04:09:12.586666976 +0000
+@@ -1189,8 +1189,6 @@ static struct ctl_table kern_table[] = {
+ 		.maxlen		= sizeof(unsigned int),
+ 		.mode		= 0644,
+ 		.proc_handler	= timer_migration_handler,
+-		.extra1		= &zero,
+-		.extra2		= &one,
+ 	},
+ #endif
+ #ifdef CONFIG_BPF_SYSCALL
+diff -urNp linux/kernel/time/timer.c linux-hao/kernel/time/timer.c
+--- linux/kernel/time/timer.c	2017-10-07 00:59:40.673020132 +0000
++++ linux-hao/kernel/time/timer.c	2017-10-05 04:09:12.596666920 +0000
+@@ -240,7 +240,7 @@ int timer_migration_handler(struct ctl_t
+ 	int ret;
+ 
+ 	mutex_lock(&mutex);
+-	ret = proc_dointvec_minmax(table, write, buffer, lenp, ppos);
++	ret = proc_dointvec(table, write, buffer, lenp, ppos);
+ 	if (!ret && write)
+ 		timers_update_migration(false);
+ 	mutex_unlock(&mutex);
+diff -urNp linux/kernel/trace/trace.c linux-hao/kernel/trace/trace.c
+--- linux/kernel/trace/trace.c	2017-10-07 00:59:40.693025555 +0000
++++ linux-hao/kernel/trace/trace.c	2017-10-05 04:09:12.616666807 +0000
+@@ -3569,17 +3569,11 @@ static int tracing_open(struct inode *in
+ 	/* If this file was open for write, then erase contents */
+ 	if ((file->f_mode & FMODE_WRITE) && (file->f_flags & O_TRUNC)) {
+ 		int cpu = tracing_get_cpu(inode);
+-		struct trace_buffer *trace_buf = &tr->trace_buffer;
+-
+-#ifdef CONFIG_TRACER_MAX_TRACE
+-		if (tr->current_trace->print_max)
+-			trace_buf = &tr->max_buffer;
+-#endif
+ 
+ 		if (cpu == RING_BUFFER_ALL_CPUS)
+-			tracing_reset_online_cpus(trace_buf);
++			tracing_reset_online_cpus(&tr->trace_buffer);
+ 		else
+-			tracing_reset(trace_buf, cpu);
++			tracing_reset(&tr->trace_buffer, cpu);
+ 	}
+ 
+ 	if (file->f_mode & FMODE_READ) {
+@@ -5134,7 +5128,7 @@ static int tracing_wait_pipe(struct file
+ 		 *
+ 		 * iter->pos will be 0 if we haven't read anything.
+ 		 */
+-		if (!tracer_tracing_is_on(iter->tr) && iter->pos)
++		if (!tracing_is_on() && iter->pos)
+ 			break;
+ 
+ 		mutex_unlock(&iter->mutex);
+diff -urNp linux/Makefile linux-hao/Makefile
+--- linux/Makefile	2017-10-07 00:57:02.393509281 +0000
++++ linux-hao/Makefile	2017-10-05 04:06:44.497502126 +0000
+@@ -1,6 +1,6 @@
+ VERSION = 4
+ PATCHLEVEL = 9
+-SUBLEVEL = 53
++SUBLEVEL = 52
+ EXTRAVERSION =
+ NAME = Roaring Lionus
+ 
+diff -urNp linux/net/mac80211/iface.c linux-hao/net/mac80211/iface.c
+--- linux/net/mac80211/iface.c	2017-10-07 00:59:41.343201478 +0000
++++ linux-hao/net/mac80211/iface.c	2017-10-05 04:09:17.906636965 +0000
+@@ -791,7 +791,6 @@ static int ieee80211_open(struct net_dev
+ static void ieee80211_do_stop(struct ieee80211_sub_if_data *sdata,
+ 			      bool going_down)
+ {
+-	struct ieee80211_sub_if_data *txq_sdata = sdata;
+ 	struct ieee80211_local *local = sdata->local;
+ 	struct fq *fq = &local->fq;
+ 	unsigned long flags;
+@@ -932,9 +931,6 @@ static void ieee80211_do_stop(struct iee
+ 
+ 	switch (sdata->vif.type) {
+ 	case NL80211_IFTYPE_AP_VLAN:
+-		txq_sdata = container_of(sdata->bss,
+-					 struct ieee80211_sub_if_data, u.ap);
+-
+ 		mutex_lock(&local->mtx);
+ 		list_del(&sdata->u.vlan.list);
+ 		mutex_unlock(&local->mtx);
+@@ -1005,17 +1001,8 @@ static void ieee80211_do_stop(struct iee
+ 	}
+ 	spin_unlock_irqrestore(&local->queue_stop_reason_lock, flags);
+ 
+-	if (txq_sdata->vif.txq) {
+-		struct txq_info *txqi = to_txq_info(txq_sdata->vif.txq);
+-
+-		/*
+-		 * FIXME FIXME
+-		 *
+-		 * We really shouldn't purge the *entire* txqi since that
+-		 * contains frames for the other AP_VLANs (and possibly
+-		 * the AP itself) as well, but there's no API in FQ now
+-		 * to be able to filter.
+-		 */
++	if (sdata->vif.txq) {
++		struct txq_info *txqi = to_txq_info(sdata->vif.txq);
+ 
+ 		spin_lock_bh(&fq->lock);
+ 		ieee80211_txq_purge(local, txqi);
+diff -urNp linux/net/mac80211/offchannel.c linux-hao/net/mac80211/offchannel.c
+--- linux/net/mac80211/offchannel.c	2017-10-07 00:59:41.353204180 +0000
++++ linux-hao/net/mac80211/offchannel.c	2017-10-05 04:09:17.916636909 +0000
+@@ -707,8 +707,6 @@ static int ieee80211_cancel_roc(struct i
+ 	if (!cookie)
+ 		return -ENOENT;
+ 
+-	flush_work(&local->hw_roc_start);
+-
+ 	mutex_lock(&local->mtx);
+ 	list_for_each_entry_safe(roc, tmp, &local->roc_list, list) {
+ 		if (!mgmt_tx && roc->cookie != cookie)
+diff -urNp linux/net/mac80211/tx.c linux-hao/net/mac80211/tx.c
+--- linux/net/mac80211/tx.c	2017-10-07 00:59:41.363206882 +0000
++++ linux-hao/net/mac80211/tx.c	2017-10-05 04:09:17.926636852 +0000
+@@ -1277,6 +1277,11 @@ static void ieee80211_set_skb_enqueue_ti
+ 	IEEE80211_SKB_CB(skb)->control.enqueue_time = codel_get_time();
+ }
+ 
++static void ieee80211_set_skb_vif(struct sk_buff *skb, struct txq_info *txqi)
++{
++	IEEE80211_SKB_CB(skb)->control.vif = txqi->txq.vif;
++}
++
+ static u32 codel_skb_len_func(const struct sk_buff *skb)
+ {
+ 	return skb->len;
+@@ -3383,7 +3388,6 @@ struct sk_buff *ieee80211_tx_dequeue(str
+ 	struct ieee80211_tx_info *info;
+ 	struct ieee80211_tx_data tx;
+ 	ieee80211_tx_result r;
+-	struct ieee80211_vif *vif;
+ 
+ 	spin_lock_bh(&fq->lock);
+ 
+@@ -3400,6 +3404,8 @@ begin:
+ 	if (!skb)
+ 		goto out;
+ 
++	ieee80211_set_skb_vif(skb, txqi);
++
+ 	hdr = (struct ieee80211_hdr *)skb->data;
+ 	info = IEEE80211_SKB_CB(skb);
+ 
+@@ -3456,34 +3462,6 @@ begin:
+ 		}
+ 	}
+ 
+-	switch (tx.sdata->vif.type) {
+-	case NL80211_IFTYPE_MONITOR:
+-		if (tx.sdata->u.mntr.flags & MONITOR_FLAG_ACTIVE) {
+-			vif = &tx.sdata->vif;
+-			break;
+-		}
+-		tx.sdata = rcu_dereference(local->monitor_sdata);
+-		if (tx.sdata) {
+-			vif = &tx.sdata->vif;
+-			info->hw_queue =
+-				vif->hw_queue[skb_get_queue_mapping(skb)];
+-		} else if (ieee80211_hw_check(&local->hw, QUEUE_CONTROL)) {
+-			ieee80211_free_txskb(&local->hw, skb);
+-			goto begin;
+-		} else {
+-			vif = NULL;
+-		}
+-		break;
+-	case NL80211_IFTYPE_AP_VLAN:
+-		tx.sdata = container_of(tx.sdata->bss,
+-					struct ieee80211_sub_if_data, u.ap);
+-		/* fall through */
+-	default:
+-		vif = &tx.sdata->vif;
+-		break;
+-	}
+-
+-	IEEE80211_SKB_CB(skb)->control.vif = vif;
+ out:
+ 	spin_unlock_bh(&fq->lock);
+ 
+diff -urNp linux/net/wireless/nl80211.c linux-hao/net/wireless/nl80211.c
+--- linux/net/wireless/nl80211.c	2017-10-07 00:59:42.233441723 +0000
++++ linux-hao/net/wireless/nl80211.c	2017-10-05 04:09:24.796598097 +0000
+@@ -10385,9 +10385,6 @@ static int nl80211_set_rekey_data(struct
+ 	if (err)
+ 		return err;
+ 
+-	if (!tb[NL80211_REKEY_DATA_REPLAY_CTR] || !tb[NL80211_REKEY_DATA_KEK] ||
+-	    !tb[NL80211_REKEY_DATA_KCK])
+-		return -EINVAL;
+ 	if (nla_len(tb[NL80211_REKEY_DATA_REPLAY_CTR]) != NL80211_REPLAY_CTR_LEN)
+ 		return -ERANGE;
+ 	if (nla_len(tb[NL80211_REKEY_DATA_KEK]) != NL80211_KEK_LEN)
+diff -urNp linux/security/keys/big_key.c linux-hao/security/keys/big_key.c
+--- linux/security/keys/big_key.c	2017-10-07 00:59:42.373479414 +0000
++++ linux-hao/security/keys/big_key.c	2017-10-05 04:09:24.946597251 +0000
+@@ -1,6 +1,5 @@
+ /* Large capacity key type
+  *
+- * Copyright (C) 2017 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
+  * Copyright (C) 2013 Red Hat, Inc. All Rights Reserved.
+  * Written by David Howells (dhowells@redhat.com)
+  *
+@@ -17,10 +16,10 @@
+ #include <linux/shmem_fs.h>
+ #include <linux/err.h>
+ #include <linux/scatterlist.h>
+-#include <linux/random.h>
+ #include <keys/user-type.h>
+ #include <keys/big_key-type.h>
+-#include <crypto/aead.h>
++#include <crypto/rng.h>
++#include <crypto/skcipher.h>
+ 
+ /*
+  * Layout of key payload words.
+@@ -50,12 +49,7 @@ enum big_key_op {
+ /*
+  * Key size for big_key data encryption
+  */
+-#define ENC_KEY_SIZE 32
+-
+-/*
+- * Authentication tag length
+- */
+-#define ENC_AUTHTAG_SIZE 16
++#define ENC_KEY_SIZE	16
+ 
+ /*
+  * big_key defined keys take an arbitrary string as the description and an
+@@ -70,62 +64,57 @@ struct key_type key_type_big_key = {
+ 	.destroy		= big_key_destroy,
+ 	.describe		= big_key_describe,
+ 	.read			= big_key_read,
+-	/* no ->update(); don't add it without changing big_key_crypt() nonce */
+ };
+ 
+ /*
+- * Crypto names for big_key data authenticated encryption
++ * Crypto names for big_key data encryption
+  */
+-static const char big_key_alg_name[] = "gcm(aes)";
++static const char big_key_rng_name[] = "stdrng";
++static const char big_key_alg_name[] = "ecb(aes)";
+ 
+ /*
+- * Crypto algorithms for big_key data authenticated encryption
++ * Crypto algorithms for big_key data encryption
+  */
+-static struct crypto_aead *big_key_aead;
++static struct crypto_rng *big_key_rng;
++static struct crypto_skcipher *big_key_skcipher;
+ 
+ /*
+- * Since changing the key affects the entire object, we need a mutex.
++ * Generate random key to encrypt big_key data
+  */
+-static DEFINE_MUTEX(big_key_aead_lock);
++static inline int big_key_gen_enckey(u8 *key)
++{
++	return crypto_rng_get_bytes(big_key_rng, key, ENC_KEY_SIZE);
++}
+ 
+ /*
+  * Encrypt/decrypt big_key data
+  */
+ static int big_key_crypt(enum big_key_op op, u8 *data, size_t datalen, u8 *key)
+ {
+-	int ret;
++	int ret = -EINVAL;
+ 	struct scatterlist sgio;
+-	struct aead_request *aead_req;
+-	/* We always use a zero nonce. The reason we can get away with this is
+-	 * because we're using a different randomly generated key for every
+-	 * different encryption. Notably, too, key_type_big_key doesn't define
+-	 * an .update function, so there's no chance we'll wind up reusing the
+-	 * key to encrypt updated data. Simply put: one key, one encryption.
+-	 */
+-	u8 zero_nonce[crypto_aead_ivsize(big_key_aead)];
+-
+-	aead_req = aead_request_alloc(big_key_aead, GFP_KERNEL);
+-	if (!aead_req)
+-		return -ENOMEM;
+-
+-	memset(zero_nonce, 0, sizeof(zero_nonce));
+-	sg_init_one(&sgio, data, datalen + (op == BIG_KEY_ENC ? ENC_AUTHTAG_SIZE : 0));
+-	aead_request_set_crypt(aead_req, &sgio, &sgio, datalen, zero_nonce);
+-	aead_request_set_callback(aead_req, CRYPTO_TFM_REQ_MAY_SLEEP, NULL, NULL);
+-	aead_request_set_ad(aead_req, 0);
++	SKCIPHER_REQUEST_ON_STACK(req, big_key_skcipher);
+ 
+-	mutex_lock(&big_key_aead_lock);
+-	if (crypto_aead_setkey(big_key_aead, key, ENC_KEY_SIZE)) {
++	if (crypto_skcipher_setkey(big_key_skcipher, key, ENC_KEY_SIZE)) {
+ 		ret = -EAGAIN;
+ 		goto error;
+ 	}
++
++	skcipher_request_set_tfm(req, big_key_skcipher);
++	skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_SLEEP,
++				      NULL, NULL);
++
++	sg_init_one(&sgio, data, datalen);
++	skcipher_request_set_crypt(req, &sgio, &sgio, datalen, NULL);
++
+ 	if (op == BIG_KEY_ENC)
+-		ret = crypto_aead_encrypt(aead_req);
++		ret = crypto_skcipher_encrypt(req);
+ 	else
+-		ret = crypto_aead_decrypt(aead_req);
++		ret = crypto_skcipher_decrypt(req);
++
++	skcipher_request_zero(req);
++
+ error:
+-	mutex_unlock(&big_key_aead_lock);
+-	aead_request_free(aead_req);
+ 	return ret;
+ }
+ 
+@@ -157,13 +146,15 @@ int big_key_preparse(struct key_preparse
+ 		 *
+ 		 * File content is stored encrypted with randomly generated key.
+ 		 */
+-		size_t enclen = datalen + ENC_AUTHTAG_SIZE;
++		size_t enclen = ALIGN(datalen, crypto_skcipher_blocksize(big_key_skcipher));
+ 
++		/* prepare aligned data to encrypt */
+ 		data = kmalloc(enclen, GFP_KERNEL);
+ 		if (!data)
+ 			return -ENOMEM;
+ 
+ 		memcpy(data, prep->data, datalen);
++		memset(data + datalen, 0x00, enclen - datalen);
+ 
+ 		/* generate random key */
+ 		enckey = kmalloc(ENC_KEY_SIZE, GFP_KERNEL);
+@@ -171,10 +162,13 @@ int big_key_preparse(struct key_preparse
+ 			ret = -ENOMEM;
+ 			goto error;
+ 		}
+-		get_random_bytes(enckey, ENC_KEY_SIZE);
++
++		ret = big_key_gen_enckey(enckey);
++		if (ret)
++			goto err_enckey;
+ 
+ 		/* encrypt aligned data */
+-		ret = big_key_crypt(BIG_KEY_ENC, data, datalen, enckey);
++		ret = big_key_crypt(BIG_KEY_ENC, data, enclen, enckey);
+ 		if (ret)
+ 			goto err_enckey;
+ 
+@@ -200,7 +194,7 @@ int big_key_preparse(struct key_preparse
+ 		*path = file->f_path;
+ 		path_get(path);
+ 		fput(file);
+-		kzfree(data);
++		kfree(data);
+ 	} else {
+ 		/* Just store the data in a buffer */
+ 		void *data = kmalloc(datalen, GFP_KERNEL);
+@@ -216,9 +210,9 @@ int big_key_preparse(struct key_preparse
+ err_fput:
+ 	fput(file);
+ err_enckey:
+-	kzfree(enckey);
++	kfree(enckey);
+ error:
+-	kzfree(data);
++	kfree(data);
+ 	return ret;
+ }
+ 
+@@ -232,7 +226,7 @@ void big_key_free_preparse(struct key_pr
+ 
+ 		path_put(path);
+ 	}
+-	kzfree(prep->payload.data[big_key_data]);
++	kfree(prep->payload.data[big_key_data]);
+ }
+ 
+ /*
+@@ -264,7 +258,7 @@ void big_key_destroy(struct key *key)
+ 		path->mnt = NULL;
+ 		path->dentry = NULL;
+ 	}
+-	kzfree(key->payload.data[big_key_data]);
++	kfree(key->payload.data[big_key_data]);
+ 	key->payload.data[big_key_data] = NULL;
+ }
+ 
+@@ -300,7 +294,7 @@ long big_key_read(const struct key *key,
+ 		struct file *file;
+ 		u8 *data;
+ 		u8 *enckey = (u8 *)key->payload.data[big_key_data];
+-		size_t enclen = datalen + ENC_AUTHTAG_SIZE;
++		size_t enclen = ALIGN(datalen, crypto_skcipher_blocksize(big_key_skcipher));
+ 
+ 		data = kmalloc(enclen, GFP_KERNEL);
+ 		if (!data)
+@@ -332,7 +326,7 @@ long big_key_read(const struct key *key,
+ err_fput:
+ 		fput(file);
+ error:
+-		kzfree(data);
++		kfree(data);
+ 	} else {
+ 		ret = datalen;
+ 		if (copy_to_user(buffer, key->payload.data[big_key_data],
+@@ -348,31 +342,47 @@ error:
+  */
+ static int __init big_key_init(void)
+ {
++	struct crypto_skcipher *cipher;
++	struct crypto_rng *rng;
+ 	int ret;
+ 
++	rng = crypto_alloc_rng(big_key_rng_name, 0, 0);
++	if (IS_ERR(rng)) {
++		pr_err("Can't alloc rng: %ld\n", PTR_ERR(rng));
++		return PTR_ERR(rng);
++	}
++
++	big_key_rng = rng;
++
++	/* seed RNG */
++	ret = crypto_rng_reset(rng, NULL, crypto_rng_seedsize(rng));
++	if (ret) {
++		pr_err("Can't reset rng: %d\n", ret);
++		goto error_rng;
++	}
++
+ 	/* init block cipher */
+-	big_key_aead = crypto_alloc_aead(big_key_alg_name, 0, CRYPTO_ALG_ASYNC);
+-	if (IS_ERR(big_key_aead)) {
+-		ret = PTR_ERR(big_key_aead);
++	cipher = crypto_alloc_skcipher(big_key_alg_name, 0, CRYPTO_ALG_ASYNC);
++	if (IS_ERR(cipher)) {
++		ret = PTR_ERR(cipher);
+ 		pr_err("Can't alloc crypto: %d\n", ret);
+-		return ret;
+-	}
+-	ret = crypto_aead_setauthsize(big_key_aead, ENC_AUTHTAG_SIZE);
+-	if (ret < 0) {
+-		pr_err("Can't set crypto auth tag len: %d\n", ret);
+-		goto free_aead;
++		goto error_rng;
+ 	}
+ 
++	big_key_skcipher = cipher;
++
+ 	ret = register_key_type(&key_type_big_key);
+ 	if (ret < 0) {
+ 		pr_err("Can't register type: %d\n", ret);
+-		goto free_aead;
++		goto error_cipher;
+ 	}
+ 
+ 	return 0;
+ 
+-free_aead:
+-	crypto_free_aead(big_key_aead);
++error_cipher:
++	crypto_free_skcipher(big_key_skcipher);
++error_rng:
++	crypto_free_rng(big_key_rng);
+ 	return ret;
+ }
+ 
+diff -urNp linux/security/keys/internal.h linux-hao/security/keys/internal.h
+--- linux/security/keys/internal.h	2017-10-07 00:59:42.373479414 +0000
++++ linux-hao/security/keys/internal.h	2017-10-05 04:09:24.956597195 +0000
+@@ -137,7 +137,7 @@ extern key_ref_t keyring_search_aux(key_
+ extern key_ref_t search_my_process_keyrings(struct keyring_search_context *ctx);
+ extern key_ref_t search_process_keyrings(struct keyring_search_context *ctx);
+ 
+-extern struct key *find_keyring_by_name(const char *name, bool uid_keyring);
++extern struct key *find_keyring_by_name(const char *name, bool skip_perm_check);
+ 
+ extern int install_user_keyrings(void);
+ extern int install_thread_keyring_to_cred(struct cred *);
+diff -urNp linux/security/keys/Kconfig linux-hao/security/keys/Kconfig
+--- linux/security/keys/Kconfig	2017-10-07 00:59:42.373479414 +0000
++++ linux-hao/security/keys/Kconfig	2017-10-05 04:09:24.946597251 +0000
+@@ -41,8 +41,10 @@ config BIG_KEYS
+ 	bool "Large payload keys"
+ 	depends on KEYS
+ 	depends on TMPFS
++	depends on (CRYPTO_ANSI_CPRNG = y || CRYPTO_DRBG = y)
+ 	select CRYPTO_AES
+-	select CRYPTO_GCM
++	select CRYPTO_ECB
++	select CRYPTO_RNG
+ 	help
+ 	  This option provides support for holding large keys within the kernel
+ 	  (for example Kerberos ticket caches).  The data may be stored out to
+diff -urNp linux/security/keys/key.c linux-hao/security/keys/key.c
+--- linux/security/keys/key.c	2017-10-07 00:59:42.373479414 +0000
++++ linux-hao/security/keys/key.c	2017-10-05 04:09:24.956597195 +0000
+@@ -301,8 +301,6 @@ struct key *key_alloc(struct key_type *t
+ 		key->flags |= 1 << KEY_FLAG_IN_QUOTA;
+ 	if (flags & KEY_ALLOC_BUILT_IN)
+ 		key->flags |= 1 << KEY_FLAG_BUILTIN;
+-	if (flags & KEY_ALLOC_UID_KEYRING)
+-		key->flags |= 1 << KEY_FLAG_UID_KEYRING;
+ 
+ #ifdef KEY_DEBUGGING
+ 	key->magic = KEY_DEBUG_MAGIC;
+diff -urNp linux/security/keys/keyctl.c linux-hao/security/keys/keyctl.c
+--- linux/security/keys/keyctl.c	2017-10-07 00:59:42.383482107 +0000
++++ linux-hao/security/keys/keyctl.c	2017-10-05 04:09:24.956597195 +0000
+@@ -766,11 +766,6 @@ long keyctl_read_key(key_serial_t keyid,
+ 
+ 	key = key_ref_to_ptr(key_ref);
+ 
+-	if (test_bit(KEY_FLAG_NEGATIVE, &key->flags)) {
+-		ret = -ENOKEY;
+-		goto error2;
+-	}
+-
+ 	/* see if we can read it directly */
+ 	ret = key_permission(key_ref, KEY_NEED_READ);
+ 	if (ret == 0)
+diff -urNp linux/security/keys/keyring.c linux-hao/security/keys/keyring.c
+--- linux/security/keys/keyring.c	2017-10-07 00:59:42.383482107 +0000
++++ linux-hao/security/keys/keyring.c	2017-10-05 04:09:24.956597195 +0000
+@@ -416,7 +416,7 @@ static void keyring_describe(const struc
+ }
+ 
+ struct keyring_read_iterator_context {
+-	size_t			buflen;
++	size_t			qty;
+ 	size_t			count;
+ 	key_serial_t __user	*buffer;
+ };
+@@ -428,9 +428,9 @@ static int keyring_read_iterator(const v
+ 	int ret;
+ 
+ 	kenter("{%s,%d},,{%zu/%zu}",
+-	       key->type->name, key->serial, ctx->count, ctx->buflen);
++	       key->type->name, key->serial, ctx->count, ctx->qty);
+ 
+-	if (ctx->count >= ctx->buflen)
++	if (ctx->count >= ctx->qty)
+ 		return 1;
+ 
+ 	ret = put_user(key->serial, ctx->buffer);
+@@ -465,12 +465,16 @@ static long keyring_read(const struct ke
+ 		return 0;
+ 
+ 	/* Calculate how much data we could return */
++	ctx.qty = nr_keys * sizeof(key_serial_t);
++
+ 	if (!buffer || !buflen)
+-		return nr_keys * sizeof(key_serial_t);
++		return ctx.qty;
++
++	if (buflen > ctx.qty)
++		ctx.qty = buflen;
+ 
+ 	/* Copy the IDs of the subscribed keys into the buffer */
+ 	ctx.buffer = (key_serial_t __user *)buffer;
+-	ctx.buflen = buflen;
+ 	ctx.count = 0;
+ 	ret = assoc_array_iterate(&keyring->keys, keyring_read_iterator, &ctx);
+ 	if (ret < 0) {
+@@ -985,15 +989,15 @@ found:
+ /*
+  * Find a keyring with the specified name.
+  *
+- * Only keyrings that have nonzero refcount, are not revoked, and are owned by a
+- * user in the current user namespace are considered.  If @uid_keyring is %true,
+- * the keyring additionally must have been allocated as a user or user session
+- * keyring; otherwise, it must grant Search permission directly to the caller.
++ * All named keyrings in the current user namespace are searched, provided they
++ * grant Search permission directly to the caller (unless this check is
++ * skipped).  Keyrings whose usage points have reached zero or who have been
++ * revoked are skipped.
+  *
+  * Returns a pointer to the keyring with the keyring's refcount having being
+  * incremented on success.  -ENOKEY is returned if a key could not be found.
+  */
+-struct key *find_keyring_by_name(const char *name, bool uid_keyring)
++struct key *find_keyring_by_name(const char *name, bool skip_perm_check)
+ {
+ 	struct key *keyring;
+ 	int bucket;
+@@ -1021,15 +1025,10 @@ struct key *find_keyring_by_name(const c
+ 			if (strcmp(keyring->description, name) != 0)
+ 				continue;
+ 
+-			if (uid_keyring) {
+-				if (!test_bit(KEY_FLAG_UID_KEYRING,
+-					      &keyring->flags))
+-					continue;
+-			} else {
+-				if (key_permission(make_key_ref(keyring, 0),
+-						   KEY_NEED_SEARCH) < 0)
+-					continue;
+-			}
++			if (!skip_perm_check &&
++			    key_permission(make_key_ref(keyring, 0),
++					   KEY_NEED_SEARCH) < 0)
++				continue;
+ 
+ 			/* we've got a match but we might end up racing with
+ 			 * key_cleanup() if the keyring is currently 'dead'
+diff -urNp linux/security/keys/process_keys.c linux-hao/security/keys/process_keys.c
+--- linux/security/keys/process_keys.c	2017-10-07 00:59:42.383482107 +0000
++++ linux-hao/security/keys/process_keys.c	2017-10-05 04:09:24.956597195 +0000
+@@ -76,8 +76,7 @@ int install_user_keyrings(void)
+ 		if (IS_ERR(uid_keyring)) {
+ 			uid_keyring = keyring_alloc(buf, user->uid, INVALID_GID,
+ 						    cred, user_keyring_perm,
+-						    KEY_ALLOC_UID_KEYRING |
+-							KEY_ALLOC_IN_QUOTA,
++						    KEY_ALLOC_IN_QUOTA,
+ 						    NULL, NULL);
+ 			if (IS_ERR(uid_keyring)) {
+ 				ret = PTR_ERR(uid_keyring);
+@@ -94,8 +93,7 @@ int install_user_keyrings(void)
+ 			session_keyring =
+ 				keyring_alloc(buf, user->uid, INVALID_GID,
+ 					      cred, user_keyring_perm,
+-					      KEY_ALLOC_UID_KEYRING |
+-						  KEY_ALLOC_IN_QUOTA,
++					      KEY_ALLOC_IN_QUOTA,
+ 					      NULL, NULL);
+ 			if (IS_ERR(session_keyring)) {
+ 				ret = PTR_ERR(session_keyring);
+diff -urNp linux/tools/testing/selftests/seccomp/seccomp_bpf.c linux-hao/tools/testing/selftests/seccomp/seccomp_bpf.c
+--- linux/tools/testing/selftests/seccomp/seccomp_bpf.c	2017-10-07 00:59:51.085789517 +0000
++++ linux-hao/tools/testing/selftests/seccomp/seccomp_bpf.c	2017-10-05 04:09:30.376566620 +0000
+@@ -6,18 +6,10 @@
+  */
+ 
+ #include <sys/types.h>
+-
+-/*
+- * glibc 2.26 and later have SIGSYS in siginfo_t. Before that,
+- * we need to use the kernel's siginfo.h file and trick glibc
+- * into accepting it.
+- */
+-#if !__GLIBC_PREREQ(2, 26)
+-# include <asm/siginfo.h>
+-# define __have_siginfo_t 1
+-# define __have_sigval_t 1
+-# define __have_sigevent_t 1
+-#endif
++#include <asm/siginfo.h>
++#define __have_siginfo_t 1
++#define __have_sigval_t 1
++#define __have_sigevent_t 1
+ 
+ #include <errno.h>
+ #include <linux/filter.h>
+@@ -684,7 +676,7 @@ TEST_F_SIGNAL(TRAP, ign, SIGSYS)
+ 	syscall(__NR_getpid);
+ }
+ 
+-static siginfo_t TRAP_info;
++static struct siginfo TRAP_info;
+ static volatile int TRAP_nr;
+ static void TRAP_action(int nr, siginfo_t *info, void *void_context)
+ {
